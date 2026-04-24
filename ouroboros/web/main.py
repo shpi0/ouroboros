@@ -1,308 +1,249 @@
-"""
-Ouroboros Web Interface — FastAPI backend.
-
-Endpoints:
-  GET  /              → chat.html (SPA)
-  GET  /stats         → stats.html
-  GET  /settings      → settings.html
-  WS   /ws/chat       → WebSocket chat relay
-  GET  /api/stats     → JSON stats from state.json + events.jsonl
-  GET  /api/settings  → JSON current settings
-  POST /api/settings  → Update total_usd budget
-  POST /api/restart   → Request agent restart
-
-Run via runner.py (started from supervisor/colab_launcher.py at boot).
-"""
-
+"""Ouroboros Web Interface — FastAPI backend."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-import pathlib
 import time
-import uuid
-from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel
+except ImportError:
+    FastAPI = None
 
 log = logging.getLogger(__name__)
 
-# -- FastAPI / Starlette
-try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-    from fastapi.staticfiles import StaticFiles
-except ImportError:
-    raise ImportError("fastapi and uvicorn required: pip install fastapi uvicorn")
+WEB_CHAT_ID = -999999
 
-# ---------------------------------------------------------------------------
-# Paths (resolved from env or defaults)
-# ---------------------------------------------------------------------------
-STATE_ROOT = pathlib.Path(os.environ.get("OUROBOROS_STATE_ROOT", "/home/ouroboros/state"))
-STATE_FILE = STATE_ROOT / "state.json"
-EVENTS_LOG = STATE_ROOT / "logs" / "events.jsonl"
-WEB_INBOX = STATE_ROOT / "web_inbox"
-WEB_OUTBOX = STATE_ROOT / "web_outbox"
-STATIC_DIR = pathlib.Path(__file__).parent / "static"
+_WEB_OUTBOX: Optional[asyncio.Queue] = None
+_ws_clients: List[WebSocket] = []
 
-WEB_INBOX.mkdir(parents=True, exist_ok=True)
-WEB_OUTBOX.mkdir(parents=True, exist_ok=True)
+DRIVE_ROOT = Path(os.environ.get("OUROBOROS_STATE_DIR", "/home/ouroboros/state"))
+STATE_FILE = DRIVE_ROOT / "state" / "state.json"
+EVENTS_FILE = DRIVE_ROOT / "logs" / "events.jsonl"
+STATIC_DIR = Path(__file__).parent / "static"
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-app = FastAPI(title="Ouroboros Web UI", docs_url=None, redoc_url=None)
+if FastAPI:
+    app = FastAPI(title="Ouroboros", docs_url=None, redoc_url=None)
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    app = None
 
 
-def _read_state() -> Dict[str, Any]:
+def get_outbox() -> asyncio.Queue:
+    global _WEB_OUTBOX
+    if _WEB_OUTBOX is None:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        _WEB_OUTBOX = asyncio.Queue(maxsize=500)
+    return _WEB_OUTBOX
+
+
+def push_to_web(text: str, is_progress: bool = False) -> None:
+    """Called from sync context to push agent response to web clients."""
+    msg = {"ts": time.time(), "text": text, "is_progress": is_progress}
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        get_outbox().put_nowait(msg)
     except Exception:
-        return {}
+        pass
 
 
-def _read_events_tail(n: int = 500) -> List[Dict[str, Any]]:
-    """Read last N lines from events.jsonl."""
-    if not EVENTS_LOG.exists():
-        return []
-    try:
-        lines = EVENTS_LOG.read_text(encoding="utf-8").splitlines()
-        events = []
-        for line in lines[-n:]:
-            raw = line.strip()
-            if not raw:
-                continue
+if app:
+    @app.get("/")
+    async def chat_page():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/stats")
+    async def stats_page():
+        return FileResponse(STATIC_DIR / "stats.html")
+
+    @app.get("/settings")
+    async def settings_page():
+        return FileResponse(STATIC_DIR / "settings.html")
+
+    @app.websocket("/ws/chat")
+    async def websocket_chat(websocket: WebSocket):
+        await websocket.accept()
+        _ws_clients.append(websocket)
+        outbox = get_outbox()
+
+        async def forward_outbox():
+            while True:
+                try:
+                    msg = await asyncio.wait_for(outbox.get(), timeout=0.5)
+                    dead = []
+                    for ws in list(_ws_clients):
+                        try:
+                            await ws.send_json({"role": "assistant", **msg})
+                        except Exception:
+                            dead.append(ws)
+                    for ws in dead:
+                        if ws in _ws_clients:
+                            _ws_clients.remove(ws)
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    await asyncio.sleep(0.1)
+
+        fwd = asyncio.create_task(forward_outbox())
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                payload = json.loads(raw)
+                text = str(payload.get("text", "")).strip()
+                if not text:
+                    continue
+                for ws in list(_ws_clients):
+                    try:
+                        await ws.send_json({"role": "user", "text": text, "ts": time.time()})
+                    except Exception:
+                        pass
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, _route_to_agent, text)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            fwd.cancel()
+            if websocket in _ws_clients:
+                _ws_clients.remove(websocket)
+
+    def _route_to_agent(text: str) -> None:
+        try:
+            from supervisor.workers import handle_chat_direct
+            handle_chat_direct(WEB_CHAT_ID, text)
+        except Exception as e:
+            log.warning("Failed to route web message to agent: %s", e)
             try:
-                events.append(json.loads(raw))
+                push_to_web(f"\u26a0\ufe0f Agent error: {e}")
             except Exception:
                 pass
-        return events
+
+    @app.get("/api/stats")
+    async def api_stats():
+        state = _read_json(STATE_FILE) or {}
+        events = _read_jsonl_tail(EVENTS_FILE, 3000)
+        tool_counts: Dict[str, int] = {}
+        costs_by_hour: Dict[str, float] = {}
+        for ev in events:
+            if ev.get("type") == "tool_call":
+                name = str(ev.get("tool") or ev.get("name") or "unknown")
+                tool_counts[name] = tool_counts.get(name, 0) + 1
+            if ev.get("type") == "llm_usage":
+                ts = str(ev.get("ts", ""))[:13]
+                cost = float(ev.get("cost") or 0)
+                costs_by_hour[ts] = costs_by_hour.get(ts, 0.0) + cost
+        top_tools = sorted(tool_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+        timeline = sorted(costs_by_hour.items())[-48:]
+        spent = float(state.get("spent_usd", 0))
+        total_budget = float(state.get("budget_limit") or 50)
+        session_snap = float(state.get("session_total_snapshot", spent))
+        return {
+            "state": {
+                "spent_usd": spent,
+                "session_spent": max(0.0, spent - session_snap),
+                "remaining_usd": max(0.0, total_budget - spent),
+                "total_budget": total_budget,
+                "spent_calls": state.get("spent_calls", 0),
+                "spent_tokens_prompt": state.get("spent_tokens_prompt", 0),
+                "spent_tokens_completion": state.get("spent_tokens_completion", 0),
+                "spent_tokens_cached": state.get("spent_tokens_cached", 0),
+                "version": state.get("version", "?"),
+                "branch": state.get("current_branch", "?"),
+                "session_id": state.get("session_id", "?"),
+            },
+            "top_tools": [{"name": k, "count": v} for k, v in top_tools],
+            "cost_timeline": [{"hour": k, "cost": round(v, 6)} for k, v in timeline],
+        }
+
+    @app.get("/api/state")
+    async def api_state():
+        state = _read_json(STATE_FILE) or {}
+        return {
+            "spent_usd": state.get("spent_usd", 0),
+            "budget_limit": float(state.get("budget_limit") or 50),
+            "version": state.get("version", "?"),
+            "branch": state.get("current_branch", "?"),
+            "session_id": state.get("session_id", "?"),
+        }
+
+    @app.get("/api/settings")
+    async def api_settings_get():
+        state = _read_json(STATE_FILE) or {}
+        return {
+            "spent_usd": float(state.get("spent_usd", 0)),
+            "total_usd": float(state.get("budget_limit") or 50),
+            "version": state.get("version", "?"),
+            "branch": state.get("current_branch", "?"),
+            "session_id": state.get("session_id", "?"),
+        }
+
+    class SettingsUpdate(BaseModel):
+        total_usd: float
+
+    @app.post("/api/settings")
+    async def api_settings_post(body: SettingsUpdate):
+        if not (0 < body.total_usd <= 10000):
+            raise HTTPException(400, "Budget must be between 1 and 10000")
+        state = _read_json(STATE_FILE) or {}
+        state["budget_limit"] = body.total_usd
+        _write_json(STATE_FILE, state)
+        return {"ok": True, "total_usd": body.total_usd}
+
+    class BudgetUpdate(BaseModel):
+        budget_limit: float
+
+    @app.post("/api/settings/budget")
+    async def update_budget(body: BudgetUpdate):
+        if not (0 < body.budget_limit <= 1000):
+            raise HTTPException(400, "Budget must be between 1 and 1000")
+        state = _read_json(STATE_FILE) or {}
+        state["budget_limit"] = body.budget_limit
+        _write_json(STATE_FILE, state)
+        return {"ok": True, "budget_limit": body.budget_limit}
+
+    @app.post("/api/restart")
+    async def trigger_restart():
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, _route_to_agent, "/restart")
+            return {"ok": True, "message": "Restart triggered"}
+        except Exception as e:
+            raise HTTPException(500, str(e))
+
+
+def _read_json(path: Path) -> Optional[Dict]:
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _write_json(path: Path, data: Dict) -> None:
+    import tempfile
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    tmp.replace(path)
+
+
+def _read_jsonl_tail(path: Path, n: int) -> List[Dict]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        result = []
+        for line in lines[-n:]:
+            try:
+                result.append(json.loads(line))
+            except Exception:
+                pass
+        return result
     except Exception:
         return []
-
-
-def _write_state(patch: Dict[str, Any]) -> bool:
-    """Patch state.json fields."""
-    try:
-        st = _read_state()
-        st.update(patch)
-        STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True
-    except Exception as e:
-        log.error("Failed to write state: %s", e)
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Static pages
-# ---------------------------------------------------------------------------
-
-@app.get("/", response_class=HTMLResponse)
-async def page_chat():
-    p = STATIC_DIR / "index.html"
-    return HTMLResponse(p.read_text(encoding="utf-8") if p.exists() else "<h1>Not found</h1>")
-
-
-@app.get("/stats", response_class=HTMLResponse)
-async def page_stats():
-    p = STATIC_DIR / "stats.html"
-    return HTMLResponse(p.read_text(encoding="utf-8") if p.exists() else "<h1>Not found</h1>")
-
-
-@app.get("/settings", response_class=HTMLResponse)
-async def page_settings():
-    p = STATIC_DIR / "settings.html"
-    return HTMLResponse(p.read_text(encoding="utf-8") if p.exists() else "<h1>Not found</h1>")
-
-
-# ---------------------------------------------------------------------------
-# API: stats
-# ---------------------------------------------------------------------------
-
-@app.get("/api/stats")
-async def api_stats():
-    st = _read_state()
-    events = _read_events_tail(1000)
-
-    # Tool call counter
-    tool_counts: Counter = Counter()
-    timeline: List[Dict[str, Any]] = []
-
-    for evt in events:
-        if not isinstance(evt, dict):
-            continue
-        t = evt.get("type") or ""
-        if t == "tool_call" or t == "tool_result":
-            tool = evt.get("tool") or evt.get("name") or ""
-            if tool:
-                tool_counts[tool] += 1
-        if t == "llm_round" and evt.get("cost_usd"):
-            timeline.append({
-                "ts": evt.get("ts") or evt.get("timestamp"),
-                "cost_usd": float(evt.get("cost_usd") or 0),
-            })
-
-    top_tools = [{"tool": k, "count": v}
-                 for k, v in tool_counts.most_common(15)]
-
-    total_usd = float(st.get("total_budget_usd") or st.get("total_usd") or 50.0)
-    spent_usd = float(st.get("spent_usd") or 0.0)
-    session_snap = float(st.get("session_total_snapshot") or 0.0)
-    session_spent = float(st.get("session_spent_snapshot") or 0.0)
-    session_spent_usd = max(0.0, spent_usd - session_snap + session_spent - session_snap)
-    # simpler: just report current session delta
-    session_spent_usd = max(0.0, spent_usd - session_snap)
-
-    return JSONResponse({
-        "spent_usd": spent_usd,
-        "session_spent_usd": session_spent_usd,
-        "total_usd": total_usd,
-        "remaining_usd": max(0.0, total_usd - spent_usd),
-        "spent_calls": int(st.get("spent_calls") or 0),
-        "spent_tokens_prompt": int(st.get("spent_tokens_prompt") or 0),
-        "spent_tokens_completion": int(st.get("spent_tokens_completion") or 0),
-        "spent_tokens_cached": int(st.get("spent_tokens_cached") or 0),
-        "version": st.get("version") or "?",
-        "branch": st.get("current_branch") or "?",
-        "top_tools": top_tools,
-        "timeline": timeline[-120:],  # last 120 LLM rounds
-    })
-
-
-# ---------------------------------------------------------------------------
-# API: settings
-# ---------------------------------------------------------------------------
-
-@app.get("/api/settings")
-async def api_settings_get():
-    st = _read_state()
-    return JSONResponse({
-        "version": st.get("version") or "?",
-        "branch": st.get("current_branch") or "?",
-        "session_id": st.get("session_id") or "?",
-        "spent_usd": float(st.get("spent_usd") or 0),
-        "total_usd": float(st.get("total_budget_usd") or st.get("total_usd") or 50.0),
-    })
-
-
-@app.post("/api/settings")
-async def api_settings_post(body: Dict[str, Any]):
-    if "total_usd" in body:
-        val = float(body["total_usd"])
-        if val <= 0:
-            return JSONResponse({"ok": False, "error": "total_usd must be > 0"}, status_code=400)
-        ok = _write_state({"total_budget_usd": val})
-        if not ok:
-            return JSONResponse({"ok": False, "error": "failed to write state"}, status_code=500)
-    return JSONResponse({"ok": True})
-
-
-# ---------------------------------------------------------------------------
-# API: restart
-# ---------------------------------------------------------------------------
-
-@app.post("/api/restart")
-async def api_restart():
-    """Inject a web restart request via web_inbox. The agent loop picks it up."""
-    msg_id = uuid.uuid4().hex[:12]
-    ws_id = "api"
-    inbox_file = WEB_INBOX / f"{int(time.time()*1000)}_{msg_id}.json"
-    try:
-        inbox_file.write_text(json.dumps({
-            "id": msg_id,
-            "ws_id": ws_id,
-            "text": "/restart Requested via web UI",
-        }, ensure_ascii=False), encoding="utf-8")
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-
-# ---------------------------------------------------------------------------
-# WebSocket chat relay
-# ---------------------------------------------------------------------------
-
-# Active WebSocket connections: ws_id → WebSocket
-_connections: Dict[str, WebSocket] = {}
-_outbox_watcher_started = False
-
-
-async def _outbox_watcher():
-    """Poll WEB_OUTBOX for response files and deliver to the right WebSocket."""
-    while True:
-        try:
-            for f in sorted(WEB_OUTBOX.glob("*.json")):
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    f.unlink(missing_ok=True)
-                    ws_id = data.get("ws_id") or ""
-                    if ws_id and ws_id in _connections:
-                        ws = _connections[ws_id]
-                        await ws.send_json(data)
-                    elif not ws_id:
-                        # Broadcast to all
-                        for ws in list(_connections.values()):
-                            try:
-                                await ws.send_json(data)
-                            except Exception:
-                                pass
-                except Exception as e:
-                    log.debug("outbox read error: %s", e)
-        except Exception as e:
-            log.debug("outbox watcher error: %s", e)
-        await asyncio.sleep(0.3)
-
-
-@app.websocket("/ws/chat")
-async def ws_chat(websocket: WebSocket):
-    global _outbox_watcher_started
-
-    await websocket.accept()
-    ws_id = uuid.uuid4().hex[:12]
-    _connections[ws_id] = websocket
-    log.info("WebSocket connected: %s", ws_id)
-
-    # Start outbox watcher if not running yet
-    if not _outbox_watcher_started:
-        _outbox_watcher_started = True
-        asyncio.create_task(_outbox_watcher())
-
-    # Send welcome message
-    await websocket.send_json({
-        "type": "system",
-        "text": "Connected to Ouroboros",
-        "ws_id": ws_id,
-    })
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                msg = {"text": raw}
-
-            text = (msg.get("text") or "").strip()
-            if not text:
-                continue
-
-            # Echo user message back
-            await websocket.send_json({
-                "type": "user",
-                "text": text,
-            })
-
-            # Write to inbox — supervisor will pick it up and route to agent
-            msg_id = uuid.uuid4().hex[:12]
-            inbox_file = WEB_INBOX / f"{int(time.time()*1000)}_{msg_id}.json"
-            inbox_file.write_text(json.dumps({
-                "id": msg_id,
-                "ws_id": ws_id,
-                "text": text,
-            }, ensure_ascii=False), encoding="utf-8")
-
-    except WebSocketDisconnect:
-        log.info("WebSocket disconnected: %s", ws_id)
-    finally:
-        _connections.pop(ws_id, None)

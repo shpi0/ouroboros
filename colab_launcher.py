@@ -249,6 +249,17 @@ assert ok, f"Bootstrap failed: {msg}"
 # ----------------------------
 # 6) Start workers
 # ----------------------------
+
+# ----------------------------
+# 6.0) Web interface
+# ----------------------------
+try:
+    from ouroboros.web.runner import start as web_start
+    web_start(host="127.0.0.1", port=8080)
+    log.info("Web interface started on http://127.0.0.1:8080")
+except Exception as _web_err:
+    log.warning("Web interface failed to start: %s", _web_err)
+
 kill_workers()
 spawn_workers(MAX_WORKERS)
 restored_pending = restore_pending_from_snapshot()

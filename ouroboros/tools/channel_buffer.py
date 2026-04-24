@@ -74,6 +74,9 @@ STRICT_FILTER_DONORS = {"warhistoryalconafter", "zloy_zhurnalist"}
 
 TELEGRAM_CAPTION_LIMIT = 1024
 
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
+
 # LLM classification cache: msg_id -> bool
 _llm_classify_cache: Dict[int, bool] = {}
 
@@ -293,6 +296,56 @@ def _strip_footers(text: str) -> str:
     return '\n'.join(clean)
 
 
+async def _llm_call(system: str, user: str, max_tokens: int = 20) -> str:
+    """Call LLM: tries Ollama first, falls back to OpenRouter on connection failure."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {"num_predict": max_tokens, "temperature": 0},
+    }
+    try:
+        try:
+            import aiohttp
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+        except ImportError:
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        log.debug("LLM backend: ollama")
+        return data["message"]["content"]
+    except Exception as ollama_err:
+        log.debug(f"Ollama unavailable ({ollama_err!r}), falling back to OpenRouter")
+
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model="google/gemini-2.0-flash-001",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=0,
+        ),
+        timeout=30,
+    )
+    log.debug("LLM backend: openrouter")
+    return response.choices[0].message.content or ""
+
+
 async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
     """Return True if the post fits @UranWar, using OpenRouter LLM. Falls back to strict keyword filter on error."""
     if msg_id is not None and msg_id in _llm_classify_cache:
@@ -310,30 +363,8 @@ async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
             _llm_classify_cache[msg_id] = False
         return False
 
-    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
-    if not api_key:
-        log.warning("LLM classify: no API key, falling back to strict keyword filter")
-        result = _is_strictly_relevant(text)
-        if msg_id is not None:
-            _llm_classify_cache[msg_id] = result
-        return result
-
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model="google/gemini-2.0-flash-001",
-                messages=[
-                    {"role": "system", "content": _LLM_SYSTEM_PROMPT},
-                    {"role": "user", "content": text[:2000]},
-                ],
-                max_tokens=10,
-                temperature=0,
-            ),
-            timeout=15,
-        )
-        raw = response.choices[0].message.content or ""
+        raw = await _llm_call(_LLM_SYSTEM_PROMPT, text[:2000], max_tokens=20)
         m = re.search(r'"ok"\s*:\s*(true|false)', raw, re.IGNORECASE)
         result = m.group(1).lower() == "true" if m else _is_strictly_relevant(text)
     except Exception as e:
@@ -351,26 +382,8 @@ async def _clean_post_text(text: str) -> str:
     if not text:
         return ""
 
-    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
-    if not api_key:
-        return _clean_text(_strip_footers(text))
-
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model="google/gemini-2.0-flash-001",
-                messages=[
-                    {"role": "system", "content": _LLM_CLEAN_SYSTEM},
-                    {"role": "user", "content": text[:3000]},
-                ],
-                max_tokens=2000,
-                temperature=0,
-            ),
-            timeout=20,
-        )
-        raw = (response.choices[0].message.content or "").strip()
+        raw = (await _llm_call(_LLM_CLEAN_SYSTEM, text[:3000], max_tokens=2000)).strip()
         json_match = re.search(r'\{[\s\S]*\}', raw)
         if json_match:
             data = json.loads(json_match.group(0))
