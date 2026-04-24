@@ -390,6 +390,23 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_to_channel(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send message to a specific Telegram channel (buffer channel)."""
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+        text = str(evt.get("text") or "")
+        if not chat_id or not text:
+            return
+        from supervisor.telegram import split_telegram, _sanitize_telegram_text
+        chunks = split_telegram(text, limit=3800)
+        for chunk in chunks:
+            ok, err = ctx.TG.send_message(chat_id, _sanitize_telegram_text(chunk))
+            if not ok:
+                log.warning("Failed to send to channel %d: %s", chat_id, err)
+    except Exception as e:
+        log.warning("send_to_channel event error: %s", e, exc_info=True)
+
+
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner_message_injected to events.jsonl for health invariant #5 (duplicate processing)."""
     from ouroboros.utils import utc_now_iso
@@ -420,6 +437,7 @@ EVENT_HANDLERS = {
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
+    "send_to_channel": _handle_send_to_channel,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,
