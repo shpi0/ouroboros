@@ -165,6 +165,36 @@ def _is_advertisement(text: str) -> bool:
         if any(phrase in low for phrase in short_ad_phrases):
             return True
 
+    # Commercial ads: paid events, courses, webinars, registration links
+    commercial_ad_phrases = [
+        "регистрация по ссылке",
+        "регистрация на семинар",
+        "регистрация на курс",
+        "регистрация на вебинар",
+        "регистрация на мероприятие",
+        "закрываем регистрацию",
+        "открываем регистрацию",
+        "присоединяйтесь к семинару",
+        "пройдет семинар",
+        "платный курс",
+        "платный семинар",
+        "записывайтесь на курс",
+        "записывайтесь на вебинар",
+        "купить билет",
+        "купите билет",
+        "стоимость участия",
+        "цена участия",
+    ]
+    if any(phrase in low for phrase in commercial_ad_phrases):
+        return True
+
+    # External commercial links (non-telegram): artamonov.online, site.ru etc.
+    # If post contains a non-tg URL AND has registration/event keywords — it's a commercial ad
+    has_external_url = bool(re.search(r'https?://(?!t\.me)[^\s]+|(?<!\S)[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?(?=\s|$)', low))
+    event_keywords = ["семинар", "вебинар", "курс", "тренинг", "мероприятие", "лекция", "воркшоп"]
+    if has_external_url and any(kw in low for kw in event_keywords):
+        return True
+
     return False
 
 
