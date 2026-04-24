@@ -407,10 +407,9 @@ async def _async_forward_posts(
         # Warm up peer cache via invite link
         target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
 
-        # Phase 1: collect all filtered candidates from all donors
-        # Each candidate: (donor, gid, msgs, text)
-        military_candidates: List[tuple] = []
-        roscosmos_candidates: List[tuple] = []
+        # Phase 1: collect all raw candidates from all donors (without LLM)
+        # Each entry: (donor, gid, msgs, text, rep_msg_id)
+        raw_candidates: List[tuple] = []
 
         for donor in donors:
             try:
@@ -429,11 +428,7 @@ async def _async_forward_posts(
                         groups[gid] = []
                     groups[gid].append(msg)
 
-                donor_count = 0
                 for gid, msgs in groups.items():
-                    if donor_count >= limit_per_donor:
-                        break
-
                     rep_msg = msgs[0]
                     text = rep_msg.text or rep_msg.caption or ""
                     for m in msgs[1:]:
@@ -445,21 +440,43 @@ async def _async_forward_posts(
                     if _is_advertisement(text):
                         continue
 
-                    # LLM relevance filter
-                    if only_relevant:
-                        if not await _llm_classify_post(text, msg_id=rep_msg.id):
-                            continue
-
-                    if donor in _military_donors:
-                        military_candidates.append((donor, gid, msgs, text))
-                    else:
-                        roscosmos_candidates.append((donor, gid, msgs, text))
-                    donor_count += 1
+                    raw_candidates.append((donor, gid, msgs, text, rep_msg.id))
 
             except Exception as e:
                 errors.append({"donor": donor, "error": repr(e)})
 
-        # Phase 2: interleave — every 4 military posts, insert 1 roscosmos post
+        # Phase 2: batch LLM classification in parallel (max 8 concurrent calls)
+        if only_relevant:
+            sem = asyncio.Semaphore(8)
+
+            async def classify_one(item):
+                donor, gid, msgs, text, rep_id = item
+                async with sem:
+                    ok = await _llm_classify_post(text, msg_id=rep_id)
+                return (donor, gid, msgs, text, ok)
+
+            classified = await asyncio.gather(*[classify_one(item) for item in raw_candidates])
+        else:
+            classified = [(donor, gid, msgs, text, True) for donor, gid, msgs, text, rep_id in raw_candidates]
+
+        # Phase 3: apply per-donor limit and split into military/roscosmos
+        per_donor_counts: Dict[str, int] = {}
+        military_candidates: List[tuple] = []
+        roscosmos_candidates: List[tuple] = []
+
+        for donor, gid, msgs, text, ok in classified:
+            if not ok:
+                continue
+            count = per_donor_counts.get(donor, 0)
+            if count >= limit_per_donor:
+                continue
+            per_donor_counts[donor] = count + 1
+            if donor in _military_donors:
+                military_candidates.append((donor, gid, msgs, text))
+            else:
+                roscosmos_candidates.append((donor, gid, msgs, text))
+
+        # Phase 4: interleave — every 4 military posts, insert 1 roscosmos post
         candidates: List[tuple] = []
         ros_idx = 0
         for i, item in enumerate(military_candidates):
@@ -469,7 +486,7 @@ async def _async_forward_posts(
                 ros_idx += 1
         candidates.extend(roscosmos_candidates[ros_idx:])
 
-        # Phase 3: send as own messages in interleaved order
+        # Phase 5: send as own messages in interleaved order
         for donor, gid, msgs, text in candidates:
             if total_limit and len(forwarded) >= total_limit:
                 break
@@ -659,28 +676,29 @@ def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL
         return json.dumps({"error": repr(e)}, ensure_ascii=False)
 
 
-def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> str:
-    """Clear buffer channel and re-fill with relevant posts from donors."""
-    try:
-        # Step 1: clear
-        clear_result = json.loads(_clear_buffer_channel(ctx, target_chat_id=target_chat_id))
-        # Step 2: fill
-        fill_result = json.loads(_forward_posts_to_buffer(
-            ctx,
-            donors=DONOR_CHANNELS,
-            limit_per_donor=25,
-            total_limit=total_posts,
-            only_relevant=True,
-            hours_back=hours_back,
-            target_chat_id=target_chat_id,
-        ))
-        return json.dumps({
-            "cleared": clear_result,
-            "filled": fill_result,
-        }, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.exception("init_buffer failed")
-        return json.dumps({"error": repr(e)}, ensure_ascii=False)
+async def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
+    """Start buffer initialization in background and return immediately."""
+    async def _run_in_background():
+        try:
+            result = await _async_clear_buffer(target_chat_id)
+            log.info(f"Buffer cleared: {result}")
+            await _async_forward_posts(
+                donors=DONOR_CHANNELS,
+                target_chat_id=target_chat_id,
+                limit_per_donor=max(30, total_posts // len(DONOR_CHANNELS) + 5),
+                total_limit=total_posts,
+                only_relevant=True,
+                hours_back=hours_back,
+            )
+            log.info("init_buffer background task completed")
+        except Exception as e:
+            log.error(f"init_buffer background error: {e!r}")
+
+    asyncio.create_task(_run_in_background())
+    return {
+        "status": "started",
+        "message": f"Buffer initialization started in background. Will fill ~{total_posts} posts from last {hours_back}h. Check the buffer channel in 5-10 minutes.",
+    }
 
 
 # ── Registry ───────────────────────────────────────────────────────────────────
