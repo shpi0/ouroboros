@@ -243,6 +243,27 @@ def _is_advertisement(text: str) -> bool:
         if len(low.replace(" ", "").replace("\n", "")) < 300 and not has_combat:
             return True
 
+    # External military recruitment posts — we don't publish these.
+    # Only our own (Battalion URAN / Roscosmos) recruitment is allowed — handled manually by Vladimir.
+    recruitment_phrases = [
+        "служба по контракту",
+        "контрактная служба",
+        "запись по контракту",
+        "набор по контракту",
+        "вступить в ряды",
+        "записаться добровольц",
+        "записаться в отряд",
+        "консультация по контракту",
+        "пункт отбора",
+        "военный контракт",
+        "подбор условий контракта",
+    ]
+    uran_markers = ["уран", "батальон уран", "roscosmos", "роскосмос"]
+    is_recruitment = any(phrase in low for phrase in recruitment_phrases)
+    is_our_recruitment = any(m in low for m in uran_markers)
+    if is_recruitment and not is_our_recruitment:
+        return True
+
     return False
 
 
@@ -646,10 +667,11 @@ async def _async_forward_posts(
             if count >= limit_per_donor:
                 continue
             per_donor_counts[donor] = count + 1
+            has_media = any(m.photo or m.video or m.document or m.animation for m in msgs)
             if donor in _military_donors:
-                military_candidates.append((donor, gid, msgs, text))
+                military_candidates.append((donor, gid, msgs, text, has_media))
             else:
-                roscosmos_candidates.append((donor, gid, msgs, text))
+                roscosmos_candidates.append((donor, gid, msgs, text, has_media))
 
         # Phase 4: interleave — every 4 military posts, insert 1 roscosmos post
         candidates: List[tuple] = []
@@ -661,8 +683,13 @@ async def _async_forward_posts(
                 ros_idx += 1
         candidates.extend(roscosmos_candidates[ros_idx:])
 
+        # Prefer posts with media over text-only
+        media_posts = [p for p in candidates if p[4]]
+        text_only_posts = [p for p in candidates if not p[4]]
+        candidates = media_posts + text_only_posts
+
         # Phase 5: send as own messages in interleaved order
-        for donor, gid, msgs, text in candidates:
+        for donor, gid, msgs, text, _has_media in candidates:
             if total_limit and len(forwarded) >= total_limit:
                 break
 
