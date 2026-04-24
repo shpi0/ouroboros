@@ -69,7 +69,9 @@ STRICT_KEYWORDS = [
 ]
 
 # Donors that require strict filtering (only STRICT_KEYWORDS, not TOPIC_KEYWORDS)
-STRICT_FILTER_DONORS = {"warhistoryalconafter"}
+STRICT_FILTER_DONORS = {"warhistoryalconafter", "zloy_zhurnalist"}
+
+TELEGRAM_CAPTION_LIMIT = 1024
 
 # LLM classification cache: msg_id -> bool
 _llm_classify_cache: Dict[int, bool] = {}
@@ -327,17 +329,19 @@ async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) 
     from pyrogram.types import InputMediaPhoto, InputMediaVideo
 
     cleaned = await _clean_post_text(text)
+    cleaned = str(cleaned) if cleaned is not None else ""
+    caption_text = cleaned[:TELEGRAM_CAPTION_LIMIT] if cleaned else None
 
     if len(msgs) == 1:
         msg = msgs[0]
         if msg.photo:
-            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=cleaned or None)
+            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=caption_text)
         elif msg.video:
-            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=cleaned or None)
+            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=caption_text)
         elif msg.animation:
-            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=cleaned or None)
+            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=caption_text)
         elif msg.document:
-            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=cleaned or None)
+            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=caption_text)
         else:
             sent = await app.send_message(target_chat_id, cleaned) if cleaned else None
         return [sent] if sent else []
@@ -345,7 +349,7 @@ async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) 
     # Media group (album)
     media = []
     for i, msg in enumerate(msgs):
-        cap = cleaned if i == 0 else None
+        cap = caption_text if i == 0 else None
         if msg.photo:
             media.append(InputMediaPhoto(msg.photo.file_id, caption=cap))
         elif msg.video:
@@ -495,6 +499,7 @@ async def _async_forward_posts(
             rep_msg = msgs[0]
 
             try:
+                text = str(text) if text is not None else ""
                 sent_msgs = await _send_as_own_message(app, target_chat_id, msgs, text)
 
                 forwarded.append({
