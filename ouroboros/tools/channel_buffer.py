@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 BUFFER_CHANNEL_ID = -1003519809178
+BUFFER_INVITE_LINK = "https://t.me/+SK3CvpXtUc0wM2Ri"
 CONFIG_PATH_DRIVE = "config/uran_buffer.json"
 SECRETS_PATH_DRIVE = "secrets/pyrogram.json"
 
@@ -197,6 +198,17 @@ async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
     return result
 
 
+async def _warm_up_buffer_peer(app, target_chat_id: int, invite_link: str = BUFFER_INVITE_LINK) -> int:
+    """Resolve buffer channel peer via invite link (needed when peer cache is empty after session restore)."""
+    try:
+        chat = await app.get_chat(invite_link)
+        log.info(f"Buffer peer resolved via invite: id={chat.id} title={chat.title}")
+        return chat.id
+    except Exception as e:
+        log.warning(f"Could not resolve via invite link: {e!r}, using raw id")
+        return target_chat_id
+
+
 # ── Pyrogram async core ────────────────────────────────────────────────────────
 
 async def _async_forward_posts(
@@ -228,15 +240,8 @@ async def _async_forward_posts(
         session_string=session_string,
         no_updates=True,
     ) as app:
-        # Warm up peer cache
-        buffer_found = False
-        async for dialog in app.get_dialogs():
-            if dialog.chat.id == target_chat_id:
-                buffer_found = True
-                log.info(f"Buffer channel found: {dialog.chat.title}")
-                break
-        if not buffer_found:
-            log.warning(f"Buffer channel {target_chat_id} not found in dialogs, trying anyway")
+        # Warm up peer cache via invite link
+        target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
 
         for donor in donors:
             if total_limit and len(forwarded) >= total_limit:
@@ -465,6 +470,7 @@ async def _async_clear_buffer(target_chat_id: int) -> Dict[str, Any]:
         session_string=secrets["session_string"],
         no_updates=True,
     ) as app:
+        target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
         msg_ids = []
         async for msg in app.get_chat_history(target_chat_id):
             msg_ids.append(msg.id)
