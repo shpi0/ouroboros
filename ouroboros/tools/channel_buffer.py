@@ -285,9 +285,14 @@ def _strip_footers(text: str) -> str:
     clean: List[str] = []
     for line in lines:
         s = line.strip()
+        # Bare @username line
         if re.match(r'^@\w+$', s):
             continue
-        if re.match(r'^https?://t\.me/\S+$', s):
+        # Any line that IS or CONTAINS a t.me link (e.g. "😡 Злой журналист http://t.me/...")
+        if re.search(r'https?://t\.me/\S+', s):
+            continue
+        # Lines with bare @username anywhere (e.g. "подписаться @channel_name")
+        if re.search(r'\s@\w{3,}$', s):
             continue
         if 'Подписаться на канал' in s:
             continue
