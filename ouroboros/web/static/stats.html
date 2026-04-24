@@ -4,149 +4,199 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ouroboros — Stats</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
     --bg: #0f0f1a; --bg2: #1a1a2e; --bg3: #16213e;
-    --accent: #6c63ff; --text: #e0e0f0; --text2: #9090a8;
+    --accent: #6c63ff; --accent2: #5a52d5;
+    --text: #e0e0f0; --text2: #9090a8; --text3: #606080;
     --border: #2a2a4a; --success: #4caf82; --warn: #f0a050;
   }
-  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
-  nav { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 24px; height: 52px; }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; display: flex; flex-direction: column; }
+
+  nav { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 24px; height: 52px; flex-shrink: 0; }
   nav .logo { font-weight: 700; font-size: 18px; color: var(--accent); letter-spacing: 1px; }
   nav a { color: var(--text2); text-decoration: none; font-size: 14px; padding: 4px 8px; border-radius: 6px; transition: color 0.2s, background 0.2s; }
   nav a:hover, nav a.active { color: var(--text); background: var(--bg3); }
-  .refresh-btn { margin-left: auto; background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: border-color 0.2s; }
-  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .last-updated { font-size: 12px; color: var(--text2); }
+  #refresh-btn { margin-left: auto; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; color: var(--text2); font-size: 13px; padding: 6px 14px; cursor: pointer; transition: color 0.2s, border-color 0.2s; }
+  #refresh-btn:hover { color: var(--text); border-color: var(--accent); }
 
-  main { padding: 24px 20px; max-width: 1100px; }
+  main { flex: 1; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 24px; max-width: 1100px; margin: 0 auto; width: 100%; }
 
-  /* Cards */
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 28px; }
-  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
-  .card-label { font-size: 12px; color: var(--text2); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .card-value { font-size: 24px; font-weight: 700; color: var(--text); }
-  .card-sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
-  .card-value.accent { color: var(--accent); }
-  .card-value.warn { color: var(--warn); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px 20px; }
+  .card .label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  .card .value { font-size: 24px; font-weight: 700; color: var(--text); }
+  .card .sub { font-size: 12px; color: var(--text3); margin-top: 4px; }
+  .card.warn .value { color: var(--warn); }
+  .card.ok .value { color: var(--success); }
 
-  /* Charts */
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
-  .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
-  .chart-title { font-size: 14px; color: var(--text2); margin-bottom: 14px; font-weight: 600; }
-  .chart-wrap { position: relative; height: 260px; }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 700px) { .chart-row { grid-template-columns: 1fr; } }
+
+  .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+  .chart-box h3 { font-size: 13px; color: var(--text2); margin-bottom: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
+  .chart-box canvas { max-height: 260px; }
+
+  #last-update { text-align: right; font-size: 11px; color: var(--text3); }
 </style>
 </head>
 <body>
 <nav>
-  <span class="logo">⚙ Ouroboros</span>
+  <span class="logo">🐍 Ouroboros</span>
   <a href="/">Chat</a>
   <a href="/stats" class="active">Stats</a>
   <a href="/settings">Settings</a>
-  <span class="last-updated" id="last-updated"></span>
-  <button class="refresh-btn" onclick="loadStats()">↻ Refresh</button>
+  <button id="refresh-btn">↺ Refresh</button>
 </nav>
 
 <main>
   <div class="cards" id="cards">
-    <div class="card"><div class="card-label">Total Spent</div><div class="card-value accent" id="c-spent">—</div><div class="card-sub" id="c-remaining"></div></div>
-    <div class="card"><div class="card-label">Session Spent</div><div class="card-value" id="c-session">—</div></div>
-    <div class="card"><div class="card-label">Budget Remaining</div><div class="card-value" id="c-budget">—</div></div>
-    <div class="card"><div class="card-label">LLM Calls</div><div class="card-value" id="c-calls">—</div></div>
-    <div class="card"><div class="card-label">Prompt Tokens</div><div class="card-value" id="c-prompt">—</div></div>
-    <div class="card"><div class="card-label">Completion Tokens</div><div class="card-value" id="c-completion">—</div></div>
-    <div class="card"><div class="card-label">Cached Tokens</div><div class="card-value accent" id="c-cached">—</div><div class="card-sub">saved by cache</div></div>
-    <div class="card"><div class="card-label">Version</div><div class="card-value" id="c-version" style="font-size:16px">—</div><div class="card-sub" id="c-branch"></div></div>
+    <div class="card"><div class="label">Loading…</div><div class="value">—</div></div>
   </div>
-
-  <div class="charts">
+  <div id="last-update">—</div>
+  <div class="chart-row">
     <div class="chart-box">
-      <div class="chart-title">Cost over time (cumulative, USD)</div>
-      <div class="chart-wrap"><canvas id="chart-timeline"></canvas></div>
+      <h3>Расход по времени (USD)</h3>
+      <canvas id="timeline-chart"></canvas>
     </div>
     <div class="chart-box">
-      <div class="chart-title">Top tools by call count</div>
-      <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
+      <h3>Топ инструментов по вызовам</h3>
+      <canvas id="tools-chart"></canvas>
     </div>
   </div>
 </main>
 
 <script>
+let timelineChart = null;
+let toolsChart = null;
+
 const CHART_DEFAULTS = {
   color: '#9090a8',
   plugins: { legend: { labels: { color: '#9090a8', font: { size: 12 } } } },
   scales: {
-    x: { ticks: { color: '#9090a8', maxRotation: 30 }, grid: { color: '#2a2a4a' } },
-    y: { ticks: { color: '#9090a8' }, grid: { color: '#2a2a4a' } }
-  }
+    x: { ticks: { color: '#9090a8', font: { size: 11 } }, grid: { color: '#2a2a4a' } },
+    y: { ticks: { color: '#9090a8', font: { size: 11 } }, grid: { color: '#2a2a4a' } },
+  },
 };
 
-let timelineChart = null;
-let toolsChart = null;
+function fmtUsd(v) { return '$' + Number(v).toFixed(4); }
+function fmtNum(v) { return Number(v).toLocaleString('ru-RU'); }
 
-function fmt(n) { return Number(n).toLocaleString(); }
-function fmtUsd(n) { return '$' + Number(n).toFixed(4); }
-
-function initCharts() {
-  timelineChart = new Chart(document.getElementById('chart-timeline'), {
-    type: 'line',
-    data: { labels: [], datasets: [{ label: 'Cumulative USD', data: [], borderColor: '#6c63ff', backgroundColor: 'rgba(108,99,255,0.1)', tension: 0.3, fill: true, pointRadius: 2 }] },
-    options: { ...CHART_DEFAULTS, responsive: true, maintainAspectRatio: false, animation: false }
-  });
-  toolsChart = new Chart(document.getElementById('chart-tools'), {
-    type: 'bar',
-    data: { labels: [], datasets: [{ label: 'Calls', data: [], backgroundColor: '#6c63ff88', borderColor: '#6c63ff', borderWidth: 1 }] },
-    options: { ...CHART_DEFAULTS, responsive: true, maintainAspectRatio: false, animation: false, indexAxis: 'y' }
-  });
-}
-
-async function loadStats() {
+async function load() {
   try {
-    const r = await fetch('/api/stats');
-    const d = await r.json();
-
-    document.getElementById('c-spent').textContent = fmtUsd(d.spent_usd);
-    document.getElementById('c-remaining').textContent = `of ${fmtUsd(d.total_usd)}`;
-    document.getElementById('c-session').textContent = fmtUsd(d.session_spent_usd);
-    document.getElementById('c-budget').textContent = fmtUsd(d.remaining_usd);
-    document.getElementById('c-calls').textContent = fmt(d.spent_calls);
-    document.getElementById('c-prompt').textContent = fmt(d.spent_tokens_prompt);
-    document.getElementById('c-completion').textContent = fmt(d.spent_tokens_completion);
-    document.getElementById('c-cached').textContent = fmt(d.spent_tokens_cached);
-    document.getElementById('c-version').textContent = d.version;
-    document.getElementById('c-branch').textContent = d.branch;
-    document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString('ru-RU');
-
-    // Timeline chart (cumulative)
-    const tl = (d.timeline || []).slice(-60);
-    let cum = 0;
-    const labels = [], values = [];
-    for (const pt of tl) {
-      cum += pt.cost_usd || 0;
-      labels.push(pt.ts ? new Date(pt.ts).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'}) : '');
-      values.push(+cum.toFixed(5));
-    }
-    timelineChart.data.labels = labels;
-    timelineChart.data.datasets[0].data = values;
-    timelineChart.update();
-
-    // Tools chart
-    const tools = d.top_tools || [];
-    toolsChart.data.labels = tools.map(t => t.tool || '?');
-    toolsChart.data.datasets[0].data = tools.map(t => t.count);
-    toolsChart.update();
-
+    const res = await fetch('/api/stats');
+    if (!res.ok) throw new Error(res.statusText);
+    const d = await res.json();
+    renderCards(d);
+    renderTimeline(d.timeline || []);
+    renderTools(d.top_tools || []);
+    document.getElementById('last-update').textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) {
-    console.error('Failed to load stats', e);
+    document.getElementById('cards').innerHTML =
+      `<div class="card"><div class="label">Error</div><div class="value" style="font-size:14px;color:#e05a5a">${e}</div></div>`;
   }
 }
 
-initCharts();
-loadStats();
-setInterval(loadStats, 30000);
+function renderCards(d) {
+  const pct = d.total_usd > 0 ? (d.spent_usd / d.total_usd * 100).toFixed(1) : '?';
+  const warnClass = parseFloat(pct) > 80 ? 'warn' : parseFloat(pct) > 50 ? '' : 'ok';
+  const cards = [
+    { label: 'Потрачено (всего)', value: fmtUsd(d.spent_usd), sub: `из ${fmtUsd(d.total_usd)} (${pct}%)`, cls: warnClass },
+    { label: 'За сессию', value: fmtUsd(d.session_spent_usd), sub: `остаток: ${fmtUsd(d.remaining_usd)}` },
+    { label: 'LLM вызовов', value: fmtNum(d.spent_calls), sub: '' },
+    { label: 'Токены (prompt)', value: fmtNum(d.spent_tokens_prompt), sub: '' },
+    { label: 'Токены (cached)', value: fmtNum(d.spent_tokens_cached), sub: '(не оплачиваются)' },
+    { label: 'Токены (completion)', value: fmtNum(d.spent_tokens_completion), sub: '' },
+    { label: 'Версия', value: d.version || '?', sub: d.branch || '' },
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c =>
+    `<div class="card ${c.cls||''}">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value}</div>
+      ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
+    </div>`
+  ).join('');
+}
+
+function renderTimeline(data) {
+  const ctx = document.getElementById('timeline-chart').getContext('2d');
+
+  // Aggregate by hour
+  const byHour = {};
+  for (const pt of data) {
+    if (!pt.ts) continue;
+    const d = new Date(pt.ts);
+    if (isNaN(d.getTime())) continue;
+    const key = d.toISOString().slice(0, 13) + ':00';
+    byHour[key] = (byHour[key] || 0) + (pt.cost_usd || 0);
+  }
+  const labels = Object.keys(byHour).sort();
+  const values = labels.map(k => byHour[k]);
+  const shortLabels = labels.map(l => l.slice(11, 16)); // HH:MM
+
+  if (timelineChart) timelineChart.destroy();
+  timelineChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: shortLabels,
+      datasets: [{
+        label: 'USD/hour',
+        data: values,
+        borderColor: '#6c63ff',
+        backgroundColor: 'rgba(108,99,255,0.12)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointBackgroundColor: '#6c63ff',
+      }],
+    },
+    options: {
+      ...CHART_DEFAULTS,
+      plugins: {
+        ...CHART_DEFAULTS.plugins,
+        tooltip: {
+          callbacks: { label: ctx => ' $' + ctx.parsed.y.toFixed(5) },
+        },
+      },
+    },
+  });
+}
+
+function renderTools(data) {
+  const ctx = document.getElementById('tools-chart').getContext('2d');
+  const top = data.slice(0, 12);
+  const COLORS = ['#6c63ff','#5a52d5','#4caf82','#f0a050','#e05a5a','#50c8f0',
+                  '#a06cff','#82cf50','#ff8c50','#50a0ff','#d050ff','#50ffb8'];
+
+  if (toolsChart) toolsChart.destroy();
+  toolsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map(t => t.tool.replace('_', ' ')),
+      datasets: [{
+        label: 'calls',
+        data: top.map(t => t.count),
+        backgroundColor: top.map((_, i) => COLORS[i % COLORS.length]),
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      ...CHART_DEFAULTS,
+      plugins: {
+        ...CHART_DEFAULTS.plugins,
+        legend: { display: false },
+      },
+    },
+  });
+}
+
+document.getElementById('refresh-btn').addEventListener('click', load);
+load();
+setInterval(load, 30000);
 </script>
 </body>
 </html>
