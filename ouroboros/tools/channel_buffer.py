@@ -96,6 +96,25 @@ _LLM_SYSTEM_PROMPT = (
     "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
 )
 
+_LLM_CLEAN_SYSTEM = (
+    "Ты — редактор военно-патриотического Telegram-канала «Батальон УРАН».\n"
+    "Твоя задача — очистить текст поста от лишнего и привести к публикабельному виду.\n\n"
+    "Правила:\n"
+    "1. УДАЛИ из текста:\n"
+    "   - Все строки-футеры типа: \"@channel_name\", \"t.me/channel\", \"Подписаться на канал\","
+    " \"Мы теперь в МАХ\", \"наш МАХ\", \"⚔️ Вспомнить о войне\","
+    " \"😡 Злой журналист http://t.me/...\", и любые подобные рекламные/навигационные строки в конце поста\n"
+    "   - Самопрезентации типа \"Подписаться | наш ВКонтакте | наш МАХ\"\n\n"
+    "2. ПЕРЕФРАЗИРУЙ (если есть):\n"
+    "   - Токсичные/жаргонные выражения: \"прожарка укропа\" → \"кадры уничтожения техники ВСУ\","
+    " \"укроп в хату\" → \"работа наших бойцов\", \"укропов нет\" → \"ВСУ уничтожены\" и т.п.\n"
+    "   - Сохраняй боевой дух, но без оскорблений\n\n"
+    "3. ЗАМЕНИ матерные слова на ***\n\n"
+    "4. НЕ МЕНЯЙ остальной текст — не переписывай, не дополняй, не сокращай смысловую часть\n\n"
+    "5. Если текст состоит только из футера/ссылок — верни пустую строку \"\"\n\n"
+    "Ответь строго JSON: {\"text\": \"очищенный текст\"}"
+)
+
 def _is_advertisement(text: str) -> bool:
     """Pre-filter: returns True only if the post's PRIMARY purpose is channel promotion.
     A post that has real content + channel link at the end is NOT an ad."""
@@ -193,6 +212,34 @@ def _has_profanity(text: str) -> bool:
     return bool(_PROFANITY_RE.search(text or ""))
 
 
+def _strip_footers(text: str) -> str:
+    """Remove channel-promo footer lines from post text."""
+    if not text:
+        return ""
+    lines = text.split('\n')
+    clean: List[str] = []
+    for line in lines:
+        s = line.strip()
+        if re.match(r'^@\w+$', s):
+            continue
+        if re.match(r'^https?://t\.me/\S+$', s):
+            continue
+        if 'Подписаться на канал' in s:
+            continue
+        if re.search(r'Мы теперь в.{0,10}М[АA]Х', s, re.IGNORECASE):
+            continue
+        if re.search(r'наш\s+М[АA]Х', s, re.IGNORECASE):
+            continue
+        if 'наш ВКонтакте' in s:
+            continue
+        if 'Подписаться |' in s or '| наш' in s:
+            continue
+        clean.append(line)
+    while clean and not clean[-1].strip():
+        clean.pop()
+    return '\n'.join(clean)
+
+
 async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
     """Return True if the post fits @UranWar, using OpenRouter LLM. Falls back to strict keyword filter on error."""
     if msg_id is not None and msg_id in _llm_classify_cache:
@@ -237,6 +284,79 @@ async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
     if msg_id is not None:
         _llm_classify_cache[msg_id] = result
     return result
+
+
+async def _clean_post_text(text: str) -> str:
+    """Clean post text via LLM: strip footers, neutralize slurs, censor profanity.
+    Falls back to regex-only if LLM is unavailable."""
+    if not text:
+        return ""
+
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
+    if not api_key:
+        return _clean_text(_strip_footers(text))
+
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                messages=[
+                    {"role": "system", "content": _LLM_CLEAN_SYSTEM},
+                    {"role": "user", "content": text[:3000]},
+                ],
+                max_tokens=2000,
+                temperature=0,
+            ),
+            timeout=20,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            return str(data.get("text", ""))
+    except Exception as e:
+        log.warning(f"LLM clean_post_text failed: {e!r}, using regex fallback")
+
+    return _clean_text(_strip_footers(text))
+
+
+async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) -> list:
+    """Send post as own message (not a forward), preserving media. Returns list of sent messages."""
+    from pyrogram.types import InputMediaPhoto, InputMediaVideo
+
+    cleaned = await _clean_post_text(text)
+
+    if len(msgs) == 1:
+        msg = msgs[0]
+        if msg.photo:
+            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=cleaned or None)
+        elif msg.video:
+            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=cleaned or None)
+        elif msg.animation:
+            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=cleaned or None)
+        elif msg.document:
+            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=cleaned or None)
+        else:
+            sent = await app.send_message(target_chat_id, cleaned) if cleaned else None
+        return [sent] if sent else []
+
+    # Media group (album)
+    media = []
+    for i, msg in enumerate(msgs):
+        cap = cleaned if i == 0 else None
+        if msg.photo:
+            media.append(InputMediaPhoto(msg.photo.file_id, caption=cap))
+        elif msg.video:
+            media.append(InputMediaVideo(msg.video.file_id, caption=cap))
+
+    if not media:
+        sent = await app.send_message(target_chat_id, cleaned) if cleaned else None
+        return [sent] if sent else []
+
+    sent_list = await app.send_media_group(target_chat_id, media=media)
+    return sent_list if isinstance(sent_list, list) else [sent_list]
 
 
 async def _warm_up_buffer_peer(app, target_chat_id: int, invite_link: str = BUFFER_INVITE_LINK) -> int:
@@ -349,32 +469,16 @@ async def _async_forward_posts(
                 ros_idx += 1
         candidates.extend(roscosmos_candidates[ros_idx:])
 
-        # Phase 3: forward in interleaved order
+        # Phase 3: send as own messages in interleaved order
         for donor, gid, msgs, text in candidates:
             if total_limit and len(forwarded) >= total_limit:
                 break
 
             message_ids = [m.id for m in msgs]
             rep_msg = msgs[0]
-            needs_caption_edit = _has_profanity(text)
 
             try:
-                fwd_msgs = await app.forward_messages(
-                    chat_id=target_chat_id,
-                    from_chat_id=donor,
-                    message_ids=message_ids,
-                )
-
-                if needs_caption_edit and fwd_msgs:
-                    clean = _clean_text(text)
-                    for fwd in (fwd_msgs if isinstance(fwd_msgs, list) else [fwd_msgs]):
-                        try:
-                            if fwd.caption:
-                                await app.edit_message_caption(target_chat_id, fwd.id, clean)
-                            elif fwd.text:
-                                await app.edit_message_text(target_chat_id, fwd.id, clean)
-                        except Exception:
-                            pass
+                sent_msgs = await _send_as_own_message(app, target_chat_id, msgs, text)
 
                 forwarded.append({
                     "donor": donor,
