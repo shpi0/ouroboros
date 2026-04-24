@@ -7,6 +7,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 from dataclasses import dataclass, field
@@ -169,7 +170,33 @@ class ToolRegistry:
         if entry is None:
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         try:
-            return entry.handler(self._ctx, **args)
+            result = entry.handler(self._ctx, **args)
+            # Handle async handlers that return coroutines
+            if asyncio.iscoroutine(result):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # We're inside a running loop - use run_coroutine_threadsafe or nest via thread
+                        import concurrent.futures
+                        import threading
+                        future = concurrent.futures.Future()
+                        def run():
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            try:
+                                future.set_result(new_loop.run_until_complete(result))
+                            except Exception as e:
+                                future.set_exception(e)
+                            finally:
+                                new_loop.close()
+                        t = threading.Thread(target=run, daemon=True)
+                        t.start()
+                        result = future.result(timeout=300)
+                    else:
+                        result = loop.run_until_complete(result)
+                except RuntimeError:
+                    result = asyncio.run(result)
+            return result
         except TypeError as e:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
