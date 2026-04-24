@@ -188,6 +188,11 @@ def _is_advertisement(text: str) -> bool:
     if any(phrase in low for phrase in commercial_ad_phrases):
         return True
 
+    # Fundraising posts with bank card numbers (e.g. "2202206296822799\nКирилл Фёдоров, сбер")
+    # Pattern: 16-digit card number (possibly with spaces) in the post
+    if re.search(r'\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b', text):
+        return True
+
     # External commercial links (non-telegram): artamonov.online, site.ru etc.
     # If post contains a non-tg URL AND has registration/event keywords — it's a commercial ad
     has_external_url = bool(re.search(r'https?://(?!t\.me)[^\s]+|(?<!\S)[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?(?=\s|$)', low))
