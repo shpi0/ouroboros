@@ -1,0 +1,58 @@
+# Ouroboros — systemd unit for VPS deployment
+#
+# Install:
+#   sudo cp ouroboros.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ouroboros
+#
+# Inspect:
+#   sudo systemctl status ouroboros
+#   sudo journalctl -u ouroboros -f
+#
+# Adjust User / paths below if you deploy under a different layout.
+
+[Unit]
+Description=Ouroboros self-modifying agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ouroboros
+Group=ouroboros
+WorkingDirectory=/home/ouroboros/app/repo
+
+# Secrets + paths are loaded from this file (chmod 600, owned by the service user).
+EnvironmentFile=/home/ouroboros/app/.env
+
+ExecStart=/home/ouroboros/app/repo/vps_bootstrap.sh
+
+# Handle /restart (which uses os.execv) and self-evolve restarts cleanly.
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Soft sandbox — the agent can write in $HOME (repo + state) and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/home/ouroboros
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Resource caps — tune for your VPS size (MAX_WORKERS=5 + Chromium can hit 3–4 GB).
+MemoryMax=3G
+TasksMax=400
+# Leave CPU uncapped; Claude/OpenRouter IO is the real bottleneck, not CPU.
+
+# Stream everything to journald; jsonl state logs still land in $OUROBOROS_STATE_DIR/logs.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
