@@ -343,6 +343,81 @@ _consciousness = BackgroundConsciousness(
     owner_chat_id_fn=_get_owner_chat_id,
 )
 
+# ----------------------------
+# 6.4) Daily buffer scheduler
+# ----------------------------
+import datetime as _dt
+
+def _buffer_scheduler_loop():
+    """Wake twice a day (06:00 and 18:00 Moscow time) and trigger fill_buffer."""
+    MSK = _dt.timezone(_dt.timedelta(hours=3))
+    TARGET_HOURS = (6, 18)      # MSK hours to run
+    CHECK_INTERVAL = 60         # seconds between checks
+    _last_run_hour: set = set() # tracks which (date, hour) we already ran
+
+    log.info("[buffer_scheduler] started — will run at %s MSK daily", TARGET_HOURS)
+    while True:
+        try:
+            now_msk = _dt.datetime.now(MSK)
+            key = (now_msk.date(), now_msk.hour)
+            if now_msk.hour in TARGET_HOURS and key not in _last_run_hour:
+                _last_run_hour.add(key)
+                # Keep set small — only remember last 6 entries
+                if len(_last_run_hour) > 6:
+                    _last_run_hour.pop()
+                log.info("[buffer_scheduler] triggering fill_buffer at %s MSK", now_msk.strftime("%H:%M"))
+                try:
+                    _fill_buffer_scheduled()
+                except Exception as exc:
+                    log.error("[buffer_scheduler] fill_buffer error: %s", exc, exc_info=True)
+        except Exception as exc:
+            log.error("[buffer_scheduler] loop error: %s", exc, exc_info=True)
+        time.sleep(CHECK_INTERVAL)
+
+
+def _fill_buffer_scheduled():
+    """Run _async_forward_posts for daily top-up (15 posts from last 24h)."""
+    import asyncio as _asyncio
+
+    def _run():
+        from ouroboros.tools.channel_buffer import (
+            _async_forward_posts, DONOR_CHANNELS, BUFFER_CHANNEL_ID
+        )
+        _loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(_loop)
+        try:
+            result = _loop.run_until_complete(
+                _async_forward_posts(
+                    donors=DONOR_CHANNELS,
+                    target_chat_id=BUFFER_CHANNEL_ID,
+                    limit_per_donor=10,
+                    total_limit=15,
+                    only_relevant=True,
+                    hours_back=24,
+                )
+            )
+            summary = f"✅ отправлено {result.get('forwarded_count', '?')} постов"
+        except Exception as exc:
+            summary = f"⚠️ ошибка: {exc}"
+            log.error("[buffer_scheduler] _run error: %s", exc, exc_info=True)
+        finally:
+            _loop.close()
+        # Notify owner
+        try:
+            st = load_state()
+            TG.send_message(st["owner_chat_id"], f"📬 Автодополнение буфера (суточный): {summary}")
+        except Exception:
+            pass
+
+    _t = threading.Thread(target=_run, daemon=True, name="buffer_daily_fill")
+    _t.start()
+
+
+_buffer_scheduler_thread = threading.Thread(target=_buffer_scheduler_loop, daemon=True)
+_buffer_scheduler_thread.start()
+log.info("[buffer_scheduler] thread started")
+
+
 def reset_chat_agent():
     """Reset the direct-mode chat agent (called by watchdog on hangs)."""
     import supervisor.workers as _w
