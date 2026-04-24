@@ -83,6 +83,18 @@ URAN_FOOTER = (
     ' <b>|</b> <a href="https://ok.ru/uranwar"><b>ОК</b></a>'
 )
 
+# Content plan: target distribution of categories in the buffer
+# Based on analysis of @UranWar posts over last 4 months (500 posts):
+# BATTLE: 69%, URAN: 7%, ROSCOSMOS: 4%, HISTORY: 3%, OTHER/misc: 16%
+# We set BATTLE higher to account for unlabeled combat content in OTHER
+CONTENT_PLAN: Dict[str, float] = {
+    "BATTLE":       0.75,
+    "URAN":         0.07,
+    "ROSCOSMOS":    0.10,   # slightly boost Roscosmos to ensure regular presence
+    "HISTORY":      0.05,
+    "HUMANITARIAN": 0.03,
+}
+
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
 
@@ -489,6 +501,34 @@ async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
     return result
 
 
+async def _llm_get_post_category(text: str) -> str:
+    """Get content category for a post using LLM. Returns one of: BATTLE, ROSCOSMOS, HISTORY, URAN, HUMANITARIAN, OTHER."""
+    if not text or len(text.strip()) < 20:
+        return "OTHER"
+
+    system = (
+        "Classify this Russian military Telegram post into ONE category.\n"
+        "Categories:\n"
+        "- BATTLE: combat ops, weapon destruction, drones, front lines, ВСУ losses\n"
+        "- ROSCOSMOS: Roscosmos news, space launches, humanitarian aid from Roscosmos\n"
+        "- HISTORY: WWII facts, historical anniversaries, Russia's past victories\n"
+        "- URAN: Battalion URAN recruitment or reports\n"
+        "- HUMANITARIAN: aid convoys, volunteer help, support for civilians\n"
+        "- OTHER: anything else\n"
+        'Reply ONLY with JSON: {"cat": "CATEGORY"}'
+    )
+    raw = await _llm_call(system, text[:400], max_tokens=20)
+    try:
+        m = re.search(r'"cat"\s*:\s*"(\w+)"', raw)
+        if m:
+            cat = m.group(1).upper()
+            valid = {"BATTLE", "ROSCOSMOS", "HISTORY", "URAN", "HUMANITARIAN", "OTHER"}
+            return cat if cat in valid else "OTHER"
+    except Exception:
+        pass
+    return "OTHER"
+
+
 async def _clean_post_text(text: str) -> str:
     """Clean post text via LLM: strip footers, neutralize slurs, censor profanity.
     Falls back to regex-only if LLM is unavailable."""
@@ -655,41 +695,84 @@ async def _async_forward_posts(
         else:
             classified = [(donor, gid, msgs, text, True) for donor, gid, msgs, text, rep_id in raw_candidates]
 
-        # Phase 3: apply per-donor limit and split into military/roscosmos
+        # Phase 3: apply per-donor limit and assign category
         per_donor_counts: Dict[str, int] = {}
-        military_candidates: List[tuple] = []
-        roscosmos_candidates: List[tuple] = []
+        categorized: List[tuple] = []  # (donor, gid, msgs, text, has_media, category)
 
-        for donor, gid, msgs, text, ok in classified:
-            if not ok:
-                continue
+        # Get categories in parallel (only for classified-ok items)
+        ok_items = [(donor, gid, msgs, text) for donor, gid, msgs, text, ok in classified if ok]
+
+        # Apply per-donor limits first
+        filtered_items = []
+        for donor, gid, msgs, text in ok_items:
             count = per_donor_counts.get(donor, 0)
             if count >= limit_per_donor:
                 continue
             per_donor_counts[donor] = count + 1
             has_media = any(m.photo or m.video or m.document or m.animation for m in msgs)
-            if donor in _military_donors:
-                military_candidates.append((donor, gid, msgs, text, has_media))
-            else:
-                roscosmos_candidates.append((donor, gid, msgs, text, has_media))
+            filtered_items.append((donor, gid, msgs, text, has_media))
 
-        # Phase 4: interleave — every 4 military posts, insert 1 roscosmos post
+        # Get categories in parallel
+        cat_sem = asyncio.Semaphore(6)
+        async def get_cat(item):
+            donor, gid, msgs, text, has_media = item
+            async with cat_sem:
+                cat = await _llm_get_post_category(text)
+            return (donor, gid, msgs, text, has_media, cat)
+
+        categorized = await asyncio.gather(*[get_cat(item) for item in filtered_items])
+
+        # Phase 4: select posts according to CONTENT_PLAN
+        # Group by category
+        by_category: Dict[str, list] = {cat: [] for cat in CONTENT_PLAN}
+        by_category["OTHER"] = []
+        for item in categorized:
+            cat = item[5]
+            if cat not in by_category:
+                cat = "OTHER"
+            by_category[cat].append(item)
+
+        # Sort each category: media first
+        for cat in by_category:
+            by_category[cat].sort(key=lambda x: 0 if x[4] else 1)
+
+        # Allocate slots per category based on total_limit and CONTENT_PLAN
+        allocations: Dict[str, int] = {}
+        for cat, fraction in CONTENT_PLAN.items():
+            allocated = min(round(total_limit * fraction), len(by_category.get(cat, [])))
+            allocations[cat] = allocated
+
+        # Fill remaining slots with BATTLE (most common)
+        allocated_total = sum(allocations.values())
+        extra = total_limit - allocated_total
+        if extra > 0:
+            battle_available = len(by_category.get("BATTLE", [])) - allocations.get("BATTLE", 0)
+            if battle_available > 0:
+                allocations["BATTLE"] = allocations.get("BATTLE", 0) + min(extra, battle_available)
+
+        # Build interleaved candidate list: spread categories evenly
+        category_queues = {cat: list(by_category.get(cat, []))[:allocations.get(cat, 0)]
+                          for cat in list(CONTENT_PLAN.keys()) + ["OTHER"]}
+
+        # Build interleaved order: insert non-BATTLE every N posts
         candidates: List[tuple] = []
-        ros_idx = 0
-        for i, item in enumerate(military_candidates):
-            candidates.append(item)
-            if (i + 1) % 4 == 0 and ros_idx < len(roscosmos_candidates):
-                candidates.append(roscosmos_candidates[ros_idx])
-                ros_idx += 1
-        candidates.extend(roscosmos_candidates[ros_idx:])
+        battle_q = category_queues.pop("BATTLE", [])
+        other_cats_items = []
+        for cat, items in category_queues.items():
+            other_cats_items.extend(items)
 
-        # Prefer posts with media over text-only
-        media_posts = [p for p in candidates if p[4]]
-        text_only_posts = [p for p in candidates if not p[4]]
-        candidates = media_posts + text_only_posts
+        # Interleave: every 4 BATTLE posts, insert 1 non-BATTLE (if available)
+        other_idx = 0
+        for i, item in enumerate(battle_q):
+            candidates.append(item)
+            if (i + 1) % 4 == 0 and other_idx < len(other_cats_items):
+                candidates.append(other_cats_items[other_idx])
+                other_idx += 1
+        # Append any remaining non-BATTLE at the end
+        candidates.extend(other_cats_items[other_idx:])
 
         # Phase 5: send as own messages in interleaved order
-        for donor, gid, msgs, text, _has_media in candidates:
+        for donor, gid, msgs, text, _has_media, *_cat in candidates:
             if total_limit and len(forwarded) >= total_limit:
                 break
 
