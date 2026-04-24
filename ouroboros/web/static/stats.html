@@ -90,8 +90,10 @@ async function load() {
     const res = await fetch('/api/stats');
     if (!res.ok) throw new Error(res.statusText);
     const d = await res.json();
-    renderCards(d);
-    renderTimeline(d.timeline || []);
+    // API returns { state: {...}, top_tools: [...], cost_timeline: [...] }
+    const s = d.state || {};
+    renderCards(s, d);
+    renderTimeline(d.cost_timeline || []);
     renderTools(d.top_tools || []);
     document.getElementById('last-update').textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) {
@@ -100,17 +102,21 @@ async function load() {
   }
 }
 
-function renderCards(d) {
-  const pct = d.total_usd > 0 ? (d.spent_usd / d.total_usd * 100).toFixed(1) : '?';
+function renderCards(s) {
+  const spent = s.spent_usd || 0;
+  const total = s.total_budget || 50;
+  const session = s.session_spent || 0;
+  const remaining = s.remaining_usd || (total - spent);
+  const pct = total > 0 ? (spent / total * 100).toFixed(1) : '?';
   const warnClass = parseFloat(pct) > 80 ? 'warn' : parseFloat(pct) > 50 ? '' : 'ok';
   const cards = [
-    { label: 'Потрачено (всего)', value: fmtUsd(d.spent_usd), sub: `из ${fmtUsd(d.total_usd)} (${pct}%)`, cls: warnClass },
-    { label: 'За сессию', value: fmtUsd(d.session_spent_usd), sub: `остаток: ${fmtUsd(d.remaining_usd)}` },
-    { label: 'LLM вызовов', value: fmtNum(d.spent_calls), sub: '' },
-    { label: 'Токены (prompt)', value: fmtNum(d.spent_tokens_prompt), sub: '' },
-    { label: 'Токены (cached)', value: fmtNum(d.spent_tokens_cached), sub: '(не оплачиваются)' },
-    { label: 'Токены (completion)', value: fmtNum(d.spent_tokens_completion), sub: '' },
-    { label: 'Версия', value: d.version || '?', sub: d.branch || '' },
+    { label: 'Потрачено (всего)', value: fmtUsd(spent), sub: `из ${fmtUsd(total)} (${pct}%)`, cls: warnClass },
+    { label: 'За сессию', value: fmtUsd(session), sub: `остаток: ${fmtUsd(remaining)}` },
+    { label: 'LLM вызовов', value: fmtNum(s.spent_calls || 0), sub: '' },
+    { label: 'Токены (prompt)', value: fmtNum(s.spent_tokens_prompt || 0), sub: '' },
+    { label: 'Токены (cached)', value: fmtNum(s.spent_tokens_cached || 0), sub: '(не оплачиваются)' },
+    { label: 'Токены (completion)', value: fmtNum(s.spent_tokens_completion || 0), sub: '' },
+    { label: 'Версия', value: s.version || '?', sub: s.branch || '' },
   ];
   document.getElementById('cards').innerHTML = cards.map(c =>
     `<div class="card ${c.cls||''}">
@@ -122,26 +128,16 @@ function renderCards(d) {
 }
 
 function renderTimeline(data) {
+  // data: [{hour: "2026-04-24T10", cost: 0.12}, ...]
   const ctx = document.getElementById('timeline-chart').getContext('2d');
-
-  // Aggregate by hour
-  const byHour = {};
-  for (const pt of data) {
-    if (!pt.ts) continue;
-    const d = new Date(pt.ts);
-    if (isNaN(d.getTime())) continue;
-    const key = d.toISOString().slice(0, 13) + ':00';
-    byHour[key] = (byHour[key] || 0) + (pt.cost_usd || 0);
-  }
-  const labels = Object.keys(byHour).sort();
-  const values = labels.map(k => byHour[k]);
-  const shortLabels = labels.map(l => l.slice(11, 16)); // HH:MM
+  const labels = data.map(pt => (pt.hour || '').slice(11, 16) || pt.hour || '');
+  const values = data.map(pt => pt.cost || 0);
 
   if (timelineChart) timelineChart.destroy();
   timelineChart = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: shortLabels,
+      labels: labels,
       datasets: [{
         label: 'USD/hour',
         data: values,
@@ -166,6 +162,7 @@ function renderTimeline(data) {
 }
 
 function renderTools(data) {
+  // data: [{name: "tool_name", count: 42}, ...]
   const ctx = document.getElementById('tools-chart').getContext('2d');
   const top = data.slice(0, 12);
   const COLORS = ['#6c63ff','#5a52d5','#4caf82','#f0a050','#e05a5a','#50c8f0',
@@ -175,10 +172,10 @@ function renderTools(data) {
   toolsChart = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: top.map(t => t.tool.replace('_', ' ')),
+      labels: top.map(t => (t.name || t.tool || '').replace(/_/g, ' ')),
       datasets: [{
         label: 'calls',
-        data: top.map(t => t.count),
+        data: top.map(t => t.count || 0),
         backgroundColor: top.map((_, i) => COLORS[i % COLORS.length]),
         borderRadius: 6,
       }],
