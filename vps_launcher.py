@@ -190,6 +190,7 @@ init_state()
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
+    transcribe_voice,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
@@ -538,6 +539,20 @@ while True:
                     b64, mime = TG.download_file_base64(file_id)
                     if b64:
                         image_data = (b64, mime, caption)
+
+        # Handle voice/audio messages
+        voice_obj = msg.get("voice") or msg.get("audio")
+        if voice_obj and not text:
+            file_id = voice_obj.get("file_id")
+            if file_id:
+                audio_bytes, ext = TG.download_file_bytes(file_id)
+                if audio_bytes:
+                    transcribed = transcribe_voice(audio_bytes, ext)
+                    if transcribed:
+                        text = f"[Голосовое сообщение]: {transcribed}"
+                        log.info("Voice message transcribed: %s", text[:100])
+                    else:
+                        text = "[Голосовое сообщение — не удалось расшифровать]"
 
         st = load_state()
         if st.get("owner_id") is None:
