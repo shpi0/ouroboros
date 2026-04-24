@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ouroboros — Settings</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f0f1a; --bg2: #1a1a2e; --bg3: #16213e;
+    --accent: #6c63ff; --text: #e0e0f0; --text2: #9090a8;
+    --border: #2a2a4a; --success: #4caf82; --danger: #e05a5a;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  nav { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 24px; height: 52px; }
+  nav .logo { font-weight: 700; font-size: 18px; color: var(--accent); letter-spacing: 1px; }
+  nav a { color: var(--text2); text-decoration: none; font-size: 14px; padding: 4px 8px; border-radius: 6px; transition: color 0.2s, background 0.2s; }
+  nav a:hover, nav a.active { color: var(--text); background: var(--bg3); }
+
+  main { padding: 32px 20px; max-width: 600px; }
+  h2 { font-size: 20px; margin-bottom: 24px; color: var(--text); }
+
+  .section { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 20px; }
+  .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text2); margin-bottom: 16px; font-weight: 600; }
+
+  .info-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .info-row:last-child { border-bottom: none; }
+  .info-label { color: var(--text2); }
+  .info-value { font-weight: 600; color: var(--text); }
+
+  .form-group { margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 6px; }
+  input[type="number"] { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 15px; padding: 10px 14px; outline: none; transition: border-color 0.2s; }
+  input[type="number"]:focus { border-color: var(--accent); }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border-radius: 8px; font-size: 14px; cursor: pointer; border: none; transition: opacity 0.2s, background 0.2s; font-family: inherit; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { opacity: 0.88; }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { opacity: 0.88; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .toast { display: none; padding: 10px 16px; border-radius: 8px; font-size: 13px; margin-top: 12px; }
+  .toast.show { display: block; }
+  .toast.success { background: rgba(76, 175, 130, 0.15); border: 1px solid var(--success); color: var(--success); }
+  .toast.error { background: rgba(224, 90, 90, 0.15); border: 1px solid var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">⚙ Ouroboros</span>
+  <a href="/">Chat</a>
+  <a href="/stats">Stats</a>
+  <a href="/settings" class="active">Settings</a>
+</nav>
+
+<main>
+  <h2>Settings</h2>
+
+  <!-- Info section -->
+  <div class="section">
+    <div class="section-title">System Info</div>
+    <div class="info-row"><span class="info-label">Version</span><span class="info-value" id="info-version">—</span></div>
+    <div class="info-row"><span class="info-label">Branch</span><span class="info-value" id="info-branch">—</span></div>
+    <div class="info-row"><span class="info-label">Session ID</span><span class="info-value" id="info-session" style="font-size:12px;font-family:monospace">—</span></div>
+    <div class="info-row"><span class="info-label">Spent</span><span class="info-value" id="info-spent">—</span></div>
+    <div class="info-row"><span class="info-label">Remaining</span><span class="info-value" id="info-remaining">—</span></div>
+  </div>
+
+  <!-- Budget section -->
+  <div class="section">
+    <div class="section-title">Budget Limit</div>
+    <div class="form-group">
+      <label for="budget-input">Total budget (USD)</label>
+      <input type="number" id="budget-input" min="1" step="1" placeholder="50">
+    </div>
+    <button class="btn btn-primary" onclick="saveBudget()" id="save-btn">Save budget</button>
+    <div class="toast" id="budget-toast"></div>
+  </div>
+
+  <!-- Restart section -->
+  <div class="section">
+    <div class="section-title">Agent Control</div>
+    <p style="font-size:13px; color: var(--text2); margin-bottom: 16px;">
+      Force restart will reload all modules and tools. The agent will be temporarily unavailable for 10–20 seconds.
+    </p>
+    <button class="btn btn-danger" onclick="forceRestart()" id="restart-btn">⟳ Force Restart</button>
+    <div class="toast" id="restart-toast"></div>
+  </div>
+</main>
+
+<script>
+function fmtUsd(n) { return '$' + Number(n).toFixed(4); }
+
+function showToast(id, msg, type) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = `toast show ${type}`;
+  setTimeout(() => el.className = 'toast', 4000);
+}
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    document.getElementById('info-version').textContent = d.version || '?';
+    document.getElementById('info-branch').textContent = d.branch || '?';
+    document.getElementById('info-session').textContent = d.session_id || '?';
+    document.getElementById('info-spent').textContent = fmtUsd(d.spent_usd || 0);
+    const rem = (d.total_usd || 50) - (d.spent_usd || 0);
+    document.getElementById('info-remaining').textContent = fmtUsd(Math.max(0, rem));
+    document.getElementById('budget-input').value = d.total_usd || 50;
+  } catch(e) {
+    console.error('Failed to load settings', e);
+  }
+}
+
+async function saveBudget() {
+  const val = parseFloat(document.getElementById('budget-input').value);
+  if (!val || val <= 0) { showToast('budget-toast', 'Enter a valid budget value', 'error'); return; }
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({total_usd: val})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      showToast('budget-toast', '✓ Budget updated', 'success');
+      await loadSettings();
+    } else {
+      showToast('budget-toast', 'Error: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch(e) {
+    showToast('budget-toast', 'Network error', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function forceRestart() {
+  if (!confirm('Force restart the agent? It will be unavailable for ~15 seconds.')) return;
+  const btn = document.getElementById('restart-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/restart', {method: 'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      showToast('restart-toast', '✓ Restart requested. Agent will reload shortly.', 'success');
+    } else {
+      showToast('restart-toast', 'Error: ' + (d.error || 'unknown'), 'error');
+    }
+  } catch(e) {
+    showToast('restart-toast', 'Network error', 'error');
+  } finally {
+    setTimeout(() => btn.disabled = false, 5000);
+  }
+}
+
+loadSettings();
+</script>
+</body>
+</html>
