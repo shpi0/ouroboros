@@ -89,9 +89,34 @@ _LLM_SYSTEM_PROMPT = (
     "- Новости о западном вооружении без контекста применения против России\n"
     "- Внутренняя политика Украины\n"
     "- Чужие войны (Ближний Восток, Африка, Азия) без связи с Россией\n"
-    "- Юмор, развлечения, никак не связанные с тематикой\n\n"
+    "- Юмор, развлечения, никак не связанные с тематикой\n"
+    "- Негативные новости о событиях на территории России: обстрелы городов РФ, пожары, экологические катастрофы, жертвы мирного населения РФ\n"
+    "- Реклама и рекомендации подписаться на другие каналы\n"
+    "- Призывы донатить/поддержать сторонние проекты\n\n"
     "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
 )
+
+def _is_advertisement(text: str) -> bool:
+    """Pre-filter: returns True if text looks like an ad or channel recommendation."""
+    if not text:
+        return False
+    low = text.lower()
+    ad_phrases = [
+        "рекомендую подписаться",
+        "подписывайтесь на канал",
+        "подпишитесь на",
+        "переходите в канал",
+        "рекомендую канал",
+        "донат",
+        "поддержите канал",
+        "поддержать наш канал",
+    ]
+    if any(phrase in low for phrase in ad_phrases):
+        return True
+    if "t.me/" in low and any(w in low for w in ("подписа", "рекомендую", "советую")):
+        return True
+    return False
+
 
 # Profanity patterns
 _PROFANITY_RE = re.compile(
@@ -222,6 +247,7 @@ async def _async_forward_posts(
     from pyrogram import Client
     from pyrogram.errors import FloodWait
     from datetime import datetime, timedelta
+    from collections import OrderedDict
 
     secrets = _load_pyrogram_secrets()
     api_id = secrets["api_id"]
@@ -233,6 +259,8 @@ async def _async_forward_posts(
     forwarded = []
     errors = []
 
+    _military_donors = {"warhistoryalconafter", "Vspomni_o_Voine_neraz", "zloy_zhurnalist"}
+
     async with Client(
         name="ouroboros_session",
         api_id=api_id,
@@ -243,15 +271,13 @@ async def _async_forward_posts(
         # Warm up peer cache via invite link
         target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
 
+        # Phase 1: collect all filtered candidates from all donors
+        # Each candidate: (donor, gid, msgs, text)
+        military_candidates: List[tuple] = []
+        roscosmos_candidates: List[tuple] = []
+
         for donor in donors:
-            if total_limit and len(forwarded) >= total_limit:
-                break
-
             try:
-                # Collect all candidate messages first, then group by media_group_id
-                # We collect raw messages (newest first from get_chat_history),
-                # filter by time, group albums, then forward oldest-first.
-
                 raw_messages = []
                 async for msg in app.get_chat_history(donor, limit=200):
                     if msg.date and msg.date < cutoff:
@@ -260,10 +286,6 @@ async def _async_forward_posts(
                         continue
                     raw_messages.append(msg)
 
-                # Group by media_group_id, preserving order (newest-first → reverse for oldest-first)
-                # Each "post unit" = list of messages with same media_group_id, or single message
-                # Use OrderedDict to preserve insertion order
-                from collections import OrderedDict
                 groups: OrderedDict = OrderedDict()
                 for msg in reversed(raw_messages):  # oldest first
                     gid = msg.media_group_id if msg.media_group_id else f"single_{msg.id}"
@@ -271,72 +293,89 @@ async def _async_forward_posts(
                         groups[gid] = []
                     groups[gid].append(msg)
 
-                # Now forward up to limit_per_donor "post units"
                 donor_count = 0
                 for gid, msgs in groups.items():
-                    if total_limit and len(forwarded) >= total_limit:
-                        break
                     if donor_count >= limit_per_donor:
                         break
 
-                    # Representative message for text/relevance check
-                    # For album: caption is usually on the first message
                     rep_msg = msgs[0]
                     text = rep_msg.text or rep_msg.caption or ""
-                    # Also check other messages in group for text
                     for m in msgs[1:]:
                         if m.text or m.caption:
                             text = m.text or m.caption
                             break
 
-                    # Relevance filter: LLM classifier for all donors
+                    # Ad pre-filter: skip immediately without calling LLM
+                    if _is_advertisement(text):
+                        continue
+
+                    # LLM relevance filter
                     if only_relevant:
                         if not await _llm_classify_post(text, msg_id=rep_msg.id):
                             continue
 
-                    # Forward all messages in the group as a batch
-                    message_ids = [m.id for m in msgs]
-                    needs_caption_edit = _has_profanity(text)
-
-                    try:
-                        fwd_msgs = await app.forward_messages(
-                            chat_id=target_chat_id,
-                            from_chat_id=donor,
-                            message_ids=message_ids,
-                        )
-
-                        # Clean profanity in caption if needed
-                        if needs_caption_edit and fwd_msgs:
-                            clean = _clean_text(text)
-                            for fwd in (fwd_msgs if isinstance(fwd_msgs, list) else [fwd_msgs]):
-                                try:
-                                    if fwd.caption:
-                                        await app.edit_message_caption(target_chat_id, fwd.id, clean)
-                                    elif fwd.text:
-                                        await app.edit_message_text(target_chat_id, fwd.id, clean)
-                                except Exception:
-                                    pass
-
-                        forwarded.append({
-                            "donor": donor,
-                            "msg_ids": message_ids,
-                            "media_group_id": gid if not gid.startswith("single_") else None,
-                            "date": rep_msg.date.isoformat() if rep_msg.date else "",
-                            "text_preview": text[:80],
-                            "count_in_group": len(msgs),
-                        })
-                        donor_count += 1
-
-                        await asyncio.sleep(1.5)
-
-                    except FloodWait as e:
-                        log.warning(f"FloodWait {e.value}s from {donor}")
-                        await asyncio.sleep(e.value + 2)
-                    except Exception as e:
-                        errors.append({"donor": donor, "msg_ids": message_ids, "error": repr(e)})
+                    if donor in _military_donors:
+                        military_candidates.append((donor, gid, msgs, text))
+                    else:
+                        roscosmos_candidates.append((donor, gid, msgs, text))
+                    donor_count += 1
 
             except Exception as e:
                 errors.append({"donor": donor, "error": repr(e)})
+
+        # Phase 2: interleave — every 4 military posts, insert 1 roscosmos post
+        candidates: List[tuple] = []
+        ros_idx = 0
+        for i, item in enumerate(military_candidates):
+            candidates.append(item)
+            if (i + 1) % 4 == 0 and ros_idx < len(roscosmos_candidates):
+                candidates.append(roscosmos_candidates[ros_idx])
+                ros_idx += 1
+        candidates.extend(roscosmos_candidates[ros_idx:])
+
+        # Phase 3: forward in interleaved order
+        for donor, gid, msgs, text in candidates:
+            if total_limit and len(forwarded) >= total_limit:
+                break
+
+            message_ids = [m.id for m in msgs]
+            rep_msg = msgs[0]
+            needs_caption_edit = _has_profanity(text)
+
+            try:
+                fwd_msgs = await app.forward_messages(
+                    chat_id=target_chat_id,
+                    from_chat_id=donor,
+                    message_ids=message_ids,
+                )
+
+                if needs_caption_edit and fwd_msgs:
+                    clean = _clean_text(text)
+                    for fwd in (fwd_msgs if isinstance(fwd_msgs, list) else [fwd_msgs]):
+                        try:
+                            if fwd.caption:
+                                await app.edit_message_caption(target_chat_id, fwd.id, clean)
+                            elif fwd.text:
+                                await app.edit_message_text(target_chat_id, fwd.id, clean)
+                        except Exception:
+                            pass
+
+                forwarded.append({
+                    "donor": donor,
+                    "msg_ids": message_ids,
+                    "media_group_id": gid if not gid.startswith("single_") else None,
+                    "date": rep_msg.date.isoformat() if rep_msg.date else "",
+                    "text_preview": text[:80],
+                    "count_in_group": len(msgs),
+                })
+
+                await asyncio.sleep(1.5)
+
+            except FloodWait as e:
+                log.warning(f"FloodWait {e.value}s from {donor}")
+                await asyncio.sleep(e.value + 2)
+            except Exception as e:
+                errors.append({"donor": donor, "msg_ids": message_ids, "error": repr(e)})
 
     return {
         "forwarded_count": len(forwarded),
