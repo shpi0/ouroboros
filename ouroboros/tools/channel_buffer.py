@@ -91,30 +91,46 @@ _LLM_SYSTEM_PROMPT = (
     "- Чужие войны (Ближний Восток, Африка, Азия) без связи с Россией\n"
     "- Юмор, развлечения, никак не связанные с тематикой\n"
     "- Негативные новости о событиях на территории России: обстрелы городов РФ, пожары, экологические катастрофы, жертвы мирного населения РФ\n"
-    "- Реклама и рекомендации подписаться на другие каналы\n"
+    "- Посты, основная цель которых — реклама или раскрутка чужого канала (без полезного контента)\n"
     "- Призывы донатить/поддержать сторонние проекты\n\n"
     "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
 )
 
 def _is_advertisement(text: str) -> bool:
-    """Pre-filter: returns True if text looks like an ad or channel recommendation."""
+    """Pre-filter: returns True only if the post's PRIMARY purpose is channel promotion.
+    A post that has real content + channel link at the end is NOT an ad."""
     if not text:
         return False
-    low = text.lower()
-    ad_phrases = [
+
+    low = text.lower().strip()
+
+    # Hard ad phrases — if post starts with these, it's an ad regardless of length
+    start_ad_phrases = [
         "рекомендую подписаться",
-        "подписывайтесь на канал",
-        "подпишитесь на",
-        "переходите в канал",
         "рекомендую канал",
-        "донат",
-        "поддержите канал",
-        "поддержать наш канал",
+        "подпишитесь на канал",
+        "друзья, рекомендую",
+        "советую подписаться",
+        "подписывайтесь на канал",
     ]
-    if any(phrase in low for phrase in ad_phrases):
-        return True
-    if "t.me/" in low and any(w in low for w in ("подписа", "рекомендую", "советую")):
-        return True
+    for phrase in start_ad_phrases:
+        if low.startswith(phrase):
+            return True
+
+    # If post is short AND contains ad language — likely pure ad
+    clean_len = len(low.replace(" ", "").replace("\n", ""))
+    if clean_len < 150:
+        short_ad_phrases = [
+            "подпишитесь на",
+            "подписывайтесь на",
+            "рекомендую",
+            "переходите в канал",
+            "поддержите канал",
+            "поддержать наш канал",
+        ]
+        if any(phrase in low for phrase in short_ad_phrases):
+            return True
+
     return False
 
 
