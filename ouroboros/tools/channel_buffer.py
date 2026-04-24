@@ -668,36 +668,60 @@ async def _async_clear_buffer(target_chat_id: int) -> Dict[str, Any]:
 
 def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL_ID) -> str:
     """Delete all messages in the buffer channel."""
-    try:
-        result = asyncio.run(_async_clear_buffer(target_chat_id))
-        return json.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        log.exception("clear_buffer_channel failed")
-        return json.dumps({"error": repr(e)}, ensure_ascii=False)
+    import threading, queue
+    result_q: queue.Queue = queue.Queue()
 
-
-async def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
-    """Start buffer initialization in background and return immediately."""
-    async def _run_in_background():
+    def _thread_main():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            result = await _async_clear_buffer(target_chat_id)
-            log.info(f"Buffer cleared: {result}")
-            await _async_forward_posts(
+            result = loop.run_until_complete(_async_clear_buffer(target_chat_id))
+            result_q.put(("ok", result))
+        except Exception as e:
+            result_q.put(("err", repr(e)))
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_thread_main, daemon=True, name="clear_buffer_thread")
+    t.start()
+    t.join(timeout=60)
+    if t.is_alive():
+        return json.dumps({"error": "timeout after 60s"}, ensure_ascii=False)
+    status, val = result_q.get()
+    if status == "err":
+        return json.dumps({"error": val}, ensure_ascii=False)
+    return json.dumps(val, ensure_ascii=False)
+
+
+def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
+    """Launch buffer initialization in a daemon thread with its own event loop and return immediately."""
+    import threading
+
+    def _thread_main():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_async_clear_buffer(target_chat_id))
+            log.info("Buffer cleared, starting forward_posts...")
+            loop.run_until_complete(_async_forward_posts(
                 donors=DONOR_CHANNELS,
                 target_chat_id=target_chat_id,
                 limit_per_donor=max(30, total_posts // len(DONOR_CHANNELS) + 5),
                 total_limit=total_posts,
                 only_relevant=True,
                 hours_back=hours_back,
-            )
-            log.info("init_buffer background task completed")
+            ))
+            log.info("init_buffer background thread completed successfully")
         except Exception as e:
-            log.error(f"init_buffer background error: {e!r}")
+            log.error(f"init_buffer background thread error: {e!r}")
+        finally:
+            loop.close()
 
-    asyncio.create_task(_run_in_background())
+    t = threading.Thread(target=_thread_main, daemon=True, name="init_buffer_thread")
+    t.start()
     return {
         "status": "started",
-        "message": f"Buffer initialization started in background. Will fill ~{total_posts} posts from last {hours_back}h. Check the buffer channel in 5-10 minutes.",
+        "message": f"Buffer initialization started in background thread. Will fill ~{total_posts} posts from last {hours_back}h. Check the buffer channel in 5-10 minutes.",
     }
 
 
