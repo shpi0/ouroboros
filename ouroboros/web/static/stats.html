@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ouroboros — Stats</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f0f1a; --bg2: #1a1a2e; --bg3: #16213e;
+    --accent: #6c63ff; --text: #e0e0f0; --text2: #9090a8;
+    --border: #2a2a4a; --success: #4caf82; --warn: #f0a050;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  nav { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 24px; height: 52px; }
+  nav .logo { font-weight: 700; font-size: 18px; color: var(--accent); letter-spacing: 1px; }
+  nav a { color: var(--text2); text-decoration: none; font-size: 14px; padding: 4px 8px; border-radius: 6px; transition: color 0.2s, background 0.2s; }
+  nav a:hover, nav a.active { color: var(--text); background: var(--bg3); }
+  .refresh-btn { margin-left: auto; background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: border-color 0.2s; }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .last-updated { font-size: 12px; color: var(--text2); }
+
+  main { padding: 24px 20px; max-width: 1100px; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 28px; }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .card-label { font-size: 12px; color: var(--text2); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-value { font-size: 24px; font-weight: 700; color: var(--text); }
+  .card-sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
+  .card-value.accent { color: var(--accent); }
+  .card-value.warn { color: var(--warn); }
+
+  /* Charts */
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+  .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .chart-title { font-size: 14px; color: var(--text2); margin-bottom: 14px; font-weight: 600; }
+  .chart-wrap { position: relative; height: 260px; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">⚙ Ouroboros</span>
+  <a href="/">Chat</a>
+  <a href="/stats" class="active">Stats</a>
+  <a href="/settings">Settings</a>
+  <span class="last-updated" id="last-updated"></span>
+  <button class="refresh-btn" onclick="loadStats()">↻ Refresh</button>
+</nav>
+
+<main>
+  <div class="cards" id="cards">
+    <div class="card"><div class="card-label">Total Spent</div><div class="card-value accent" id="c-spent">—</div><div class="card-sub" id="c-remaining"></div></div>
+    <div class="card"><div class="card-label">Session Spent</div><div class="card-value" id="c-session">—</div></div>
+    <div class="card"><div class="card-label">Budget Remaining</div><div class="card-value" id="c-budget">—</div></div>
+    <div class="card"><div class="card-label">LLM Calls</div><div class="card-value" id="c-calls">—</div></div>
+    <div class="card"><div class="card-label">Prompt Tokens</div><div class="card-value" id="c-prompt">—</div></div>
+    <div class="card"><div class="card-label">Completion Tokens</div><div class="card-value" id="c-completion">—</div></div>
+    <div class="card"><div class="card-label">Cached Tokens</div><div class="card-value accent" id="c-cached">—</div><div class="card-sub">saved by cache</div></div>
+    <div class="card"><div class="card-label">Version</div><div class="card-value" id="c-version" style="font-size:16px">—</div><div class="card-sub" id="c-branch"></div></div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-box">
+      <div class="chart-title">Cost over time (cumulative, USD)</div>
+      <div class="chart-wrap"><canvas id="chart-timeline"></canvas></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Top tools by call count</div>
+      <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const CHART_DEFAULTS = {
+  color: '#9090a8',
+  plugins: { legend: { labels: { color: '#9090a8', font: { size: 12 } } } },
+  scales: {
+    x: { ticks: { color: '#9090a8', maxRotation: 30 }, grid: { color: '#2a2a4a' } },
+    y: { ticks: { color: '#9090a8' }, grid: { color: '#2a2a4a' } }
+  }
+};
+
+let timelineChart = null;
+let toolsChart = null;
+
+function fmt(n) { return Number(n).toLocaleString(); }
+function fmtUsd(n) { return '$' + Number(n).toFixed(4); }
+
+function initCharts() {
+  timelineChart = new Chart(document.getElementById('chart-timeline'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'Cumulative USD', data: [], borderColor: '#6c63ff', backgroundColor: 'rgba(108,99,255,0.1)', tension: 0.3, fill: true, pointRadius: 2 }] },
+    options: { ...CHART_DEFAULTS, responsive: true, maintainAspectRatio: false, animation: false }
+  });
+  toolsChart = new Chart(document.getElementById('chart-tools'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'Calls', data: [], backgroundColor: '#6c63ff88', borderColor: '#6c63ff', borderWidth: 1 }] },
+    options: { ...CHART_DEFAULTS, responsive: true, maintainAspectRatio: false, animation: false, indexAxis: 'y' }
+  });
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+
+    document.getElementById('c-spent').textContent = fmtUsd(d.spent_usd);
+    document.getElementById('c-remaining').textContent = `of ${fmtUsd(d.total_usd)}`;
+    document.getElementById('c-session').textContent = fmtUsd(d.session_spent_usd);
+    document.getElementById('c-budget').textContent = fmtUsd(d.remaining_usd);
+    document.getElementById('c-calls').textContent = fmt(d.spent_calls);
+    document.getElementById('c-prompt').textContent = fmt(d.spent_tokens_prompt);
+    document.getElementById('c-completion').textContent = fmt(d.spent_tokens_completion);
+    document.getElementById('c-cached').textContent = fmt(d.spent_tokens_cached);
+    document.getElementById('c-version').textContent = d.version;
+    document.getElementById('c-branch').textContent = d.branch;
+    document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString('ru-RU');
+
+    // Timeline chart (cumulative)
+    const tl = (d.timeline || []).slice(-60);
+    let cum = 0;
+    const labels = [], values = [];
+    for (const pt of tl) {
+      cum += pt.cost_usd || 0;
+      labels.push(pt.ts ? new Date(pt.ts).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'}) : '');
+      values.push(+cum.toFixed(5));
+    }
+    timelineChart.data.labels = labels;
+    timelineChart.data.datasets[0].data = values;
+    timelineChart.update();
+
+    // Tools chart
+    const tools = d.top_tools || [];
+    toolsChart.data.labels = tools.map(t => t.tool || '?');
+    toolsChart.data.datasets[0].data = tools.map(t => t.count);
+    toolsChart.update();
+
+  } catch(e) {
+    console.error('Failed to load stats', e);
+  }
+}
+
+initCharts();
+loadStats();
+setInterval(loadStats, 30000);
+</script>
+</body>
+</html>
