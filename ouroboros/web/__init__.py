@@ -1,1 +1,1 @@
-# ouroboros.web — FastAPI web interface package
+"""Ouroboros Web Interface package."""
