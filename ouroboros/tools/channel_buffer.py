@@ -47,6 +47,29 @@ TOPIC_KEYWORDS = [
     "история", "великая отечественная", "вов",
 ]
 
+# Strict keywords for donors that cover broad topics (e.g. warhistoryalconafter)
+# Only posts matching these will be selected from strict-filtered donors
+STRICT_KEYWORDS = [
+    # Direct Russia/SVO connection
+    "россия", "российск", "рф", "русск",
+    "сво", "спецоперац",
+    "украин",  # only as battlefield context
+    "донбасс", "луганск", "донецк", "запорожье", "херсон", "харьков",
+    "белгород", "брянск", "курск",
+    # Russian military/weapons
+    "армия россий", "вс рф", "минобороны", "генштаб",
+    "ланцет", "герань", "кинжал", "калибр", "искандер",
+    "дрон", "бпла", "fpv",
+    # Battalion/Roscosmos specific
+    "уран", "батальон", "роскосмос", "космос",
+    # Russian achievements/history
+    "победа", "9 мая", "великая отечественная", "вов",
+    "достижен", "рекорд",
+]
+
+# Donors that require strict filtering (only STRICT_KEYWORDS, not TOPIC_KEYWORDS)
+STRICT_FILTER_DONORS = {"warhistoryalconafter"}
+
 # Profanity patterns
 _PROFANITY_RE = re.compile(
     r'\b(бля|блять|блядь|хуй|хуя|хуе|хуи|пизд\w*|еба\w*|ёба\w*|ёб\w*|'
@@ -84,6 +107,14 @@ def _is_relevant(text: str) -> bool:
         return False
     low = text.lower()
     return any(kw in low for kw in TOPIC_KEYWORDS)
+
+
+def _is_strictly_relevant(text: str) -> bool:
+    """Strict relevance check for broad-topic donors — must have direct Russia/SVO connection."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(kw in low for kw in STRICT_KEYWORDS)
 
 
 def _clean_text(text: str) -> str:
@@ -185,9 +216,14 @@ async def _async_forward_posts(
                             text = m.text or m.caption
                             break
 
-                    # Relevance filter
-                    if only_relevant and not _is_relevant(text):
-                        continue
+                    # Relevance filter: strict for broad-topic donors, normal for others
+                    if only_relevant:
+                        if donor in STRICT_FILTER_DONORS:
+                            if not _is_strictly_relevant(text):
+                                continue
+                        else:
+                            if not _is_relevant(text):
+                                continue
 
                     # Forward all messages in the group as a batch
                     message_ids = [m.id for m in msgs]
