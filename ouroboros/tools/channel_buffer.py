@@ -450,6 +450,74 @@ def _fetch_channel_posts(ctx: ToolContext, username: str, limit: int = 30) -> st
     }, ensure_ascii=False, indent=2)
 
 
+async def _async_clear_buffer(target_chat_id: int) -> Dict[str, Any]:
+    from pyrogram import Client
+    from pyrogram.errors import FloodWait
+
+    secrets = _load_pyrogram_secrets()
+    deleted = 0
+    errors = []
+
+    async with Client(
+        name="ouroboros_session",
+        api_id=secrets["api_id"],
+        api_hash=secrets["api_hash"],
+        session_string=secrets["session_string"],
+        no_updates=True,
+    ) as app:
+        msg_ids = []
+        async for msg in app.get_chat_history(target_chat_id):
+            msg_ids.append(msg.id)
+
+        # Delete in batches of 100
+        for i in range(0, len(msg_ids), 100):
+            batch = msg_ids[i:i+100]
+            try:
+                await app.delete_messages(target_chat_id, batch)
+                deleted += len(batch)
+                await asyncio.sleep(0.5)
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 2)
+            except Exception as e:
+                errors.append(repr(e))
+
+    return {"deleted_count": deleted, "errors": errors}
+
+
+def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL_ID) -> str:
+    """Delete all messages in the buffer channel."""
+    try:
+        result = asyncio.run(_async_clear_buffer(target_chat_id))
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        log.exception("clear_buffer_channel failed")
+        return json.dumps({"error": repr(e)}, ensure_ascii=False)
+
+
+def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> str:
+    """Clear buffer channel and re-fill with relevant posts from donors."""
+    try:
+        # Step 1: clear
+        clear_result = json.loads(_clear_buffer_channel(ctx, target_chat_id=target_chat_id))
+        # Step 2: fill
+        fill_result = json.loads(_forward_posts_to_buffer(
+            ctx,
+            donors=DONOR_CHANNELS,
+            limit_per_donor=25,
+            total_limit=total_posts,
+            only_relevant=True,
+            hours_back=hours_back,
+            target_chat_id=target_chat_id,
+        ))
+        return json.dumps({
+            "cleared": clear_result,
+            "filled": fill_result,
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.exception("init_buffer failed")
+        return json.dumps({"error": repr(e)}, ensure_ascii=False)
+
+
 # ── Registry ───────────────────────────────────────────────────────────────────
 
 def get_tools() -> List[ToolEntry]:
@@ -522,4 +590,42 @@ def get_tools() -> List[ToolEntry]:
                 "required": ["username"],
             },
         }, _fetch_channel_posts),
+
+        ToolEntry("clear_buffer_channel", {
+            "name": "clear_buffer_channel",
+            "description": "Delete all messages in the buffer channel to reset it",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_chat_id": {
+                        "type": "integer",
+                        "description": "Target channel chat_id (default: -1003519809178 buffer)",
+                    },
+                },
+                "required": [],
+            },
+        }, _clear_buffer_channel),
+
+        ToolEntry("init_buffer", {
+            "name": "init_buffer",
+            "description": "Clear buffer and re-fill with ~70 relevant posts from donor channels (use for initialization or full reset)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "total_posts": {
+                        "type": "integer",
+                        "description": "Total posts to forward after clearing (default: 70)",
+                    },
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "How many hours back to look for posts (default: 168 = 7 days)",
+                    },
+                    "target_chat_id": {
+                        "type": "integer",
+                        "description": "Target channel chat_id (default: -1003519809178 buffer)",
+                    },
+                },
+                "required": [],
+            },
+        }, _init_buffer),
     ]
