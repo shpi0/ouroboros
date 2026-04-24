@@ -626,6 +626,25 @@ while True:
                     if b64:
                         image_data = (b64, mime, caption)
 
+        # Extract voice/audio transcription if present
+        voice_transcription = None
+        _voice = msg.get("voice") or msg.get("audio")
+        if _voice:
+            _file_id = _voice.get("file_id")
+            if _file_id:
+                from supervisor.telegram import transcribe_voice
+                _audio_bytes, _audio_ext = TG.download_file_bytes(_file_id)
+                if _audio_bytes:
+                    voice_transcription = transcribe_voice(_audio_bytes, _audio_ext)
+                    if voice_transcription:
+                        log.info("Voice message transcribed: %s...", voice_transcription[:60])
+                    else:
+                        log.warning("Voice transcription failed for file_id=%s", _file_id)
+
+        # Apply voice transcription as text input
+        if voice_transcription and not text:
+            text = f"🎤 {voice_transcription}"
+
         st = load_state()
         if st.get("owner_id") is None:
             st["owner_id"] = user_id
@@ -658,7 +677,7 @@ while True:
                 log.warning("Supervisor command handler error", exc_info=True)
 
         # All other messages (and dual-path commands) → direct chat with Ouroboros
-        if not text and not image_data:
+        if not text and not image_data and not voice_transcription:
             continue  # empty message, skip
 
         # Feed observation to consciousness

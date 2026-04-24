@@ -165,6 +165,57 @@ class TelegramClient:
             log.warning("Failed to download file_id=%s from Telegram", file_id, exc_info=True)
             return None, ""
 
+    def download_file_bytes(self, file_id: str, max_bytes: int = 25_000_000) -> Tuple[Optional[bytes], str]:
+        """Download a file from Telegram and return (raw_bytes, file_extension). Returns (None, "") on failure."""
+        try:
+            r = requests.get(f"{self.base}/getFile", params={"file_id": file_id}, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                return None, ""
+            file_path = data["result"].get("file_path", "")
+            file_size = int(data["result"].get("file_size") or 0)
+            if file_size > max_bytes:
+                return None, ""
+            download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+            r2 = requests.get(download_url, timeout=60)
+            r2.raise_for_status()
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "oga"
+            return r2.content, ext
+        except Exception:
+            log.warning("Failed to download bytes file_id=%s from Telegram", file_id, exc_info=True)
+            return None, ""
+
+
+def transcribe_voice(audio_bytes: bytes, ext: str = "oga") -> Optional[str]:
+    """Transcribe voice/audio bytes using OpenAI Whisper API. Returns text or None on failure."""
+    import os, io
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        log.warning("OPENAI_API_KEY not set, cannot transcribe voice")
+        return None
+
+    try:
+        fmt_map = {"oga": "ogg", "ogg": "ogg", "mp3": "mp3", "wav": "wav", "m4a": "m4a", "webm": "webm", "mp4": "mp4"}
+        fmt = fmt_map.get(ext, "ogg")
+        filename = f"voice.{fmt}"
+
+        import requests as req
+        resp = req.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (filename, io.BytesIO(audio_bytes), f"audio/{fmt}")},
+            data={"model": "whisper-1", "language": "ru"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("text", "").strip()
+        log.info("Voice transcribed (%d bytes → %d chars)", len(audio_bytes), len(text))
+        return text if text else None
+    except Exception:
+        log.warning("OpenAI Whisper transcription failed", exc_info=True)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Message splitting + formatting
