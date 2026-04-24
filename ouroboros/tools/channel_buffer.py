@@ -14,6 +14,7 @@ Buffer channel: -1003519809178
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -730,9 +731,64 @@ def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168,
     }
 
 
+# ── Daily scheduler ───────────────────────────────────────────────────────────
+
+def _start_daily_scheduler():
+    """Background thread: forward 12-15 posts to buffer at 06:00 and 18:00 MSK."""
+    import threading
+
+    def _scheduler_loop():
+        MOSCOW_OFFSET = datetime.timezone(datetime.timedelta(hours=3))
+        RUN_HOURS = {6, 18}  # 06:00 and 18:00 MSK
+        last_run_hour: Optional[int] = None
+
+        log.info("Daily buffer scheduler started (06:00 and 18:00 MSK)")
+        while True:
+            try:
+                now_msk = datetime.datetime.now(MOSCOW_OFFSET)
+                current_hour = now_msk.hour
+                current_minute = now_msk.minute
+
+                # Run at target hours, minutes 0-4, and only once per hour
+                if current_hour in RUN_HOURS and current_minute < 5 and last_run_hour != current_hour:
+                    log.info(f"Daily scheduler: starting buffer top-up at {now_msk.strftime('%H:%M')} MSK")
+                    last_run_hour = current_hour
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        result = loop.run_until_complete(_async_forward_posts(
+                            donors=DONOR_CHANNELS,
+                            target_chat_id=BUFFER_CHANNEL_ID,
+                            limit_per_donor=5,
+                            total_limit=15,
+                            only_relevant=True,
+                            hours_back=26,
+                        ))
+                        log.info(f"Daily scheduler completed: {result}")
+                    except Exception as e:
+                        log.error(f"Daily scheduler error: {e!r}")
+                    finally:
+                        loop.close()
+
+                # Sleep 60 seconds between checks
+                import time
+                time.sleep(60)
+            except Exception as e:
+                log.error(f"Daily scheduler loop error: {e!r}")
+                import time
+                time.sleep(60)
+
+    t = threading.Thread(target=_scheduler_loop, daemon=True, name="daily_buffer_scheduler")
+    t.start()
+    log.info("Daily buffer scheduler thread launched")
+
+
 # ── Registry ───────────────────────────────────────────────────────────────────
 
 def get_tools() -> List[ToolEntry]:
+    if not getattr(_start_daily_scheduler, "_started", False):
+        _start_daily_scheduler._started = True
+        _start_daily_scheduler()
     return [
         ToolEntry("forward_posts_to_buffer", {
             "name": "forward_posts_to_buffer",
