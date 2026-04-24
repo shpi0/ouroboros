@@ -114,14 +114,14 @@ async def _async_forward_posts(
     """
     from pyrogram import Client
     from pyrogram.errors import FloodWait
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
 
     secrets = _load_pyrogram_secrets()
     api_id = secrets["api_id"]
     api_hash = secrets["api_hash"]
     session_string = secrets["session_string"]
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    cutoff = datetime.utcnow() - timedelta(hours=hours_back)
 
     forwarded = []
     errors = []
@@ -133,6 +133,17 @@ async def _async_forward_posts(
         session_string=session_string,
         no_updates=True,
     ) as app:
+        # Warm up peer cache by iterating dialogs (needed for private channels without username)
+        buffer_found = False
+        async for dialog in app.get_dialogs():
+            if dialog.chat.id == target_chat_id:
+                buffer_found = True
+                log.info(f"Buffer channel found: {dialog.chat.title}")
+                break
+        if not buffer_found:
+            # Try anyway — might work if peer is in cache from session
+            log.warning(f"Buffer channel {target_chat_id} not found in dialogs, trying anyway")
+
         for donor in donors:
             donor_count = 0
             try:
@@ -142,7 +153,7 @@ async def _async_forward_posts(
 
                     # Time filter
                     if msg.date and msg.date < cutoff:
-                        break  # older than cutoff, channel history is reverse-chron
+                        continue  # older than cutoff — keep scanning (donor may have pinned old posts)
 
                     # Skip service messages
                     if not (msg.text or msg.caption or msg.photo or msg.video or msg.document):
