@@ -107,7 +107,8 @@ _LLM_SYSTEM_PROMPT = (
     "- Юмор, развлечения, никак не связанные с тематикой\n"
     "- СТРОГО ЗАПРЕЩЕНО: любые новости об атаках на территорию России — обстрелы городов РФ дронами/ракетами ВСУ, пожары/взрывы на российских предприятиях от атак, жертвы среди мирного населения РФ, атаки БПЛА на российские регионы. Даже если пострадавших нет — такие новости НЕ публикуем.\n"
     "- Посты, основная цель которых — реклама или раскрутка чужого канала (без полезного контента)\n"
-    "- Призывы донатить/поддержать сторонние проекты\n\n"
+    "- Призывы донатить/поддержать сторонние проекты\n"
+    "- Личные рекомендации книг, фильмов, других каналов или продуктов (даже по военной тематике) — если это не боевые новости\n\n"
     "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
 )
 
@@ -199,6 +200,48 @@ def _is_advertisement(text: str) -> bool:
     event_keywords = ["семинар", "вебинар", "курс", "тренинг", "мероприятие", "лекция", "воркшоп"]
     if has_external_url and any(kw in low for kw in event_keywords):
         return True
+
+    # Soft ads: personal recommendations of books, products, content
+    soft_rec_phrases = [
+        "крайне рекомендую",
+        "очень рекомендую",
+        "рекомендую книгу",
+        "рекомендую прочит",
+        "рекомендую посмотр",
+        "рекомендую этот канал",
+        "рекомендую всем",
+        "советую прочит",
+        "советую посмотр",
+        "советую всем",
+    ]
+    # Check if it's a soft-ad post: recommendation WITHOUT combat content
+    combat_keywords = [
+        "бпла", "дрон", "ланцет", "герань", "уничтожен", "наступлен",
+        "оборон", "фронт", "ВСУ", "всу", "боевые", "операци", "выдвижени",
+        "атак", "обстрел", "роскосмос", "батальон уран",
+    ]
+    has_soft_rec = any(phrase in low for phrase in soft_rec_phrases)
+    has_combat = any(kw in low for kw in combat_keywords)
+    if has_soft_rec and not has_combat:
+        return True
+
+    # Fundraising progress reports: "100к из 600", "50 000р.", "удвоил", "собрано X"
+    # These are donation collection posts — we don't publish them
+    fundraising_phrases = [
+        "из 600", "из 500", "из 400", "из 300", "из 200", "из 100",  # "Xк из Yк"
+        "удвоил", "утроил",
+        "собрано ", "собрали ",
+        "помогите собрать",
+        "осталось собрать",
+        "цель сбора",
+        "сумма сбора",
+    ]
+    rub_pattern = re.search(r'\d[\d\s]*[рр]\b|[\d]+к\s+из\s+[\d]+|[\d\s]+руб', low)
+    has_fundraising = any(phrase in low for phrase in fundraising_phrases)
+    if (has_fundraising or rub_pattern) and not has_combat:
+        # Only flag if post is short (pure fundraising report) and has no combat content
+        if len(low.replace(" ", "").replace("\n", "")) < 300 and not has_combat:
+            return True
 
     return False
 
