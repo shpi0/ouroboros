@@ -70,6 +70,28 @@ STRICT_KEYWORDS = [
 # Donors that require strict filtering (only STRICT_KEYWORDS, not TOPIC_KEYWORDS)
 STRICT_FILTER_DONORS = {"warhistoryalconafter"}
 
+# LLM classification cache: msg_id -> bool
+_llm_classify_cache: Dict[int, bool] = {}
+
+_LLM_SYSTEM_PROMPT = (
+    "Ты — модератор военно-патриотического Telegram-канала «Батальон УРАН» (подразделение Роскосмоса, СВО).\n"
+    "Оцени, подходит ли данный пост для публикации.\n\n"
+    "Подходит:\n"
+    "- Боевые операции российской армии, уничтожение техники ВСУ, работа дронов/Ланцетов/Гераней\n"
+    "- Достижения российского ВПК и армии (новое вооружение, передача техники)\n"
+    "- Рекрутинг в батальон УРАН\n"
+    "- Деятельность Роскосмоса (гуманитарная помощь, мероприятия, космос)\n"
+    "- Помощь ветеранам СВО, поддержка военных\n"
+    "- Победа, история ВОВ, российские праздники в контексте СВО\n\n"
+    "НЕ подходит:\n"
+    "- Зарубежная политика и дипломатия без прямой связи с СВО\n"
+    "- Новости о западном вооружении без контекста применения против России\n"
+    "- Внутренняя политика Украины\n"
+    "- Чужие войны (Ближний Восток, Африка, Азия) без связи с Россией\n"
+    "- Юмор, развлечения, никак не связанные с тематикой\n\n"
+    "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
+)
+
 # Profanity patterns
 _PROFANITY_RE = re.compile(
     r'\b(бля|блять|блядь|хуй|хуя|хуе|хуи|пизд\w*|еба\w*|ёба\w*|ёб\w*|'
@@ -127,6 +149,52 @@ def _clean_text(text: str) -> str:
 
 def _has_profanity(text: str) -> bool:
     return bool(_PROFANITY_RE.search(text or ""))
+
+
+async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
+    """Return True if the post fits @UranWar, using OpenRouter LLM. Falls back to strict keyword filter on error."""
+    if msg_id is not None and msg_id in _llm_classify_cache:
+        return _llm_classify_cache[msg_id]
+
+    if not text or not text.strip():
+        result = False
+        if msg_id is not None:
+            _llm_classify_cache[msg_id] = result
+        return result
+
+    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
+    if not api_key:
+        log.warning("LLM classify: no API key, falling back to strict keyword filter")
+        result = _is_strictly_relevant(text)
+        if msg_id is not None:
+            _llm_classify_cache[msg_id] = result
+        return result
+
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                messages=[
+                    {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": text[:2000]},
+                ],
+                max_tokens=10,
+                temperature=0,
+            ),
+            timeout=15,
+        )
+        raw = response.choices[0].message.content or ""
+        m = re.search(r'"ok"\s*:\s*(true|false)', raw, re.IGNORECASE)
+        result = m.group(1).lower() == "true" if m else _is_strictly_relevant(text)
+    except Exception as e:
+        log.warning(f"LLM classify failed: {e!r}, falling back to strict keyword filter")
+        result = _is_strictly_relevant(text)
+
+    if msg_id is not None:
+        _llm_classify_cache[msg_id] = result
+    return result
 
 
 # ── Pyrogram async core ────────────────────────────────────────────────────────
@@ -216,14 +284,10 @@ async def _async_forward_posts(
                             text = m.text or m.caption
                             break
 
-                    # Relevance filter: strict for broad-topic donors, normal for others
+                    # Relevance filter: LLM classifier for all donors
                     if only_relevant:
-                        if donor in STRICT_FILTER_DONORS:
-                            if not _is_strictly_relevant(text):
-                                continue
-                        else:
-                            if not _is_relevant(text):
-                                continue
+                        if not await _llm_classify_post(text, msg_id=rep_msg.id):
+                            continue
 
                     # Forward all messages in the group as a batch
                     message_ids = [m.id for m in msgs]
