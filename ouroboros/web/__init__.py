@@ -1,1 +1,1 @@
-# Ouroboros Web Interface
+# ouroboros.web — FastAPI web interface package
