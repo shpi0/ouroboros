@@ -74,6 +74,15 @@ STRICT_FILTER_DONORS = {"warhistoryalconafter", "zloy_zhurnalist"}
 
 TELEGRAM_CAPTION_LIMIT = 1024
 
+# Footer appended to every post sent to the buffer channel
+URAN_FOOTER = (
+    '\n\n<b>Батальон "УРАН"</b>\n'
+    '<a href="https://max.ru/uranwar"><b>MAX</b></a>'
+    ' <b>|</b> <a href="https://t.me/uranwar"><b>ТГ</b></a>'
+    ' <b>|</b> <a href="https://vk.com/uranwar"><b>ВК</b></a>'
+    ' <b>|</b> <a href="https://ok.ru/uranwar"><b>ОК</b></a>'
+)
+
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
 
@@ -394,26 +403,35 @@ async def _clean_post_text(text: str) -> str:
     return _clean_text(_strip_footers(text))
 
 
+def _add_uran_footer(text: str) -> str:
+    """Append Батальон УРАН branded footer to post text (HTML formatted)."""
+    return (text.rstrip() if text else "") + URAN_FOOTER
+
+
 async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) -> list:
     """Send post as own message (not a forward), preserving media. Returns list of sent messages."""
     from pyrogram.types import InputMediaPhoto, InputMediaVideo
 
     cleaned = await _clean_post_text(text)
     cleaned = str(cleaned) if cleaned is not None else ""
-    caption_text = cleaned[:TELEGRAM_CAPTION_LIMIT] if cleaned else None
+    max_main_len = TELEGRAM_CAPTION_LIMIT - len(URAN_FOOTER)
+    if len(cleaned) > max_main_len:
+        cleaned = cleaned[:max_main_len].rstrip()
+    cleaned = _add_uran_footer(cleaned)
+    caption_text = cleaned if cleaned else None
 
     if len(msgs) == 1:
         msg = msgs[0]
         if msg.photo:
-            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=caption_text)
+            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=caption_text, parse_mode="html")
         elif msg.video:
-            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=caption_text)
+            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=caption_text, parse_mode="html")
         elif msg.animation:
-            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=caption_text)
+            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=caption_text, parse_mode="html")
         elif msg.document:
-            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=caption_text)
+            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=caption_text, parse_mode="html")
         else:
-            sent = await app.send_message(target_chat_id, cleaned) if cleaned else None
+            sent = await app.send_message(target_chat_id, cleaned, parse_mode="html") if cleaned else None
         return [sent] if sent else []
 
     # Media group (album)
@@ -421,12 +439,12 @@ async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) 
     for i, msg in enumerate(msgs):
         cap = caption_text if i == 0 else None
         if msg.photo:
-            media.append(InputMediaPhoto(msg.photo.file_id, caption=cap))
+            media.append(InputMediaPhoto(msg.photo.file_id, caption=cap, parse_mode="html"))
         elif msg.video:
-            media.append(InputMediaVideo(msg.video.file_id, caption=cap))
+            media.append(InputMediaVideo(msg.video.file_id, caption=cap, parse_mode="html"))
 
     if not media:
-        sent = await app.send_message(target_chat_id, cleaned) if cleaned else None
+        sent = await app.send_message(target_chat_id, cleaned, parse_mode="html") if cleaned else None
         return [sent] if sent else []
 
     sent_list = await app.send_media_group(target_chat_id, media=media)
