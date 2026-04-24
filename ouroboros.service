@@ -25,7 +25,7 @@ WorkingDirectory=/home/ouroboros/app/repo
 # Secrets + paths are loaded from this file (chmod 600, owned by the service user).
 EnvironmentFile=/home/ouroboros/app/.env
 
-ExecStart=/home/ouroboros/app/repo/vps_bootstrap.sh
+ExecStart=/bin/bash /home/ouroboros/app/repo/vps_bootstrap.sh
 
 # Handle /restart (which uses os.execv) and self-evolve restarts cleanly.
 Restart=always
@@ -37,7 +37,7 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/home/ouroboros
+ReadWritePaths=/home/ouroboros /usr/local/bin/apply_patch
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
