@@ -93,7 +93,7 @@ _LLM_SYSTEM_PROMPT = (
     "- Внутренняя политика Украины\n"
     "- Чужие войны (Ближний Восток, Африка, Азия) без связи с Россией\n"
     "- Юмор, развлечения, никак не связанные с тематикой\n"
-    "- Негативные новости о событиях на территории России: обстрелы городов РФ, пожары, экологические катастрофы, жертвы мирного населения РФ\n"
+    "- СТРОГО ЗАПРЕЩЕНО: любые новости об атаках на территорию России — обстрелы городов РФ дронами/ракетами ВСУ, пожары/взрывы на российских предприятиях от атак, жертвы среди мирного населения РФ, атаки БПЛА на российские регионы. Даже если пострадавших нет — такие новости НЕ публикуем.\n"
     "- Посты, основная цель которых — реклама или раскрутка чужого канала (без полезного контента)\n"
     "- Призывы донатить/поддержать сторонние проекты\n\n"
     "Ответь строго JSON: {\"ok\": true} или {\"ok\": false}"
@@ -154,6 +154,56 @@ def _is_advertisement(text: str) -> bool:
             return True
 
     return False
+
+
+def _is_negative_russia_news(text: str) -> bool:
+    """Pre-filter: block news about attacks on Russian territory, civilian casualties in RF, fires from drone strikes."""
+    if not text:
+        return False
+    low = text.lower()
+
+    # Атаки ВСУ/БПЛА на территорию России
+    attack_patterns = [
+        r'атак[а-я]*\s+(бпла|дрон|ракет)',
+        r'(бпла|дрон|ракет)[а-я]*\s+вс[уу]',
+        r'удар[а-я]*\s+по\s+[а-я]+ской\s+области',
+        r'попадани[а-я]*\s+(украинского|вражеского)\s+(дрон|бпла|ракет)',
+        r'обломк[а-я]*\s+(дрон|бпла|ракет)[а-я]*',
+    ]
+
+    # Российские регионы — контекст атаки
+    russia_regions = [
+        'самарской области', 'нижегородской области', 'белгородской области',
+        'курской области', 'брянской области', 'воронежской области',
+        'ростовской области', 'краснодарского края', 'московской области',
+        'саратовской области', 'тульской области', 'орловской области',
+        'липецкой области', 'тамбовской области', 'рязанской области',
+        'в новокуйбышевске', 'в туапсе', 'в белгороде', 'в брянске',
+        'в курске', 'в воронеже',
+    ]
+
+    # Последствия атак
+    consequence_patterns = [
+        r'(погиб|ранен|пострадав)[а-я]*.*\s+(при\s+атак|от\s+удар|при\s+обстрел)',
+        r'(пожар|взрыв|разрушен)[а-я]*.*\s+(от\s+(дрон|бпла|атак|удар))',
+        r'(атак[а-я]*|обстрел[а-я]*)\s+.{0,30}(промпредприят|предприят|завод|нефтеперераб)',
+    ]
+
+    # Уровень загрязнения / экокатастрофы в РФ
+    eco_patterns = [
+        r'уровень\s+(бензол|ксилол|сажи|загрязнен)',
+        r'превысил норму в .{0,20}раз',
+    ]
+
+    import re as _re
+
+    has_attack = any(_re.search(p, low) for p in attack_patterns)
+    has_region = any(r in low for r in russia_regions)
+    has_consequence = any(_re.search(p, low) for p in consequence_patterns)
+    has_eco = any(_re.search(p, low) for p in eco_patterns)
+
+    # Блокируем если: (атака + российский регион) ИЛИ последствие атаки ИЛИ экокатастрофа
+    return (has_attack and has_region) or has_consequence or has_eco
 
 
 # Profanity patterns
@@ -253,6 +303,12 @@ async def _llm_classify_post(text: str, msg_id: Optional[int] = None) -> bool:
         if msg_id is not None:
             _llm_classify_cache[msg_id] = result
         return result
+
+    # Pre-filter: block negative Russia territory news without LLM call
+    if _is_negative_russia_news(text):
+        if msg_id is not None:
+            _llm_classify_cache[msg_id] = False
+        return False
 
     api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_KEY", "")
     if not api_key:
