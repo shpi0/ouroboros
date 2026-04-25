@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -374,6 +375,111 @@ _PROFANITY_RE = re.compile(
 )
 
 
+# ── Persistent post database ───────────────────────────────────────────────────
+
+DB_PATH = "/home/ouroboros/state/buffer_posts.db"
+
+class PostDB:
+    """Thread-safe SQLite store for tracking processed posts."""
+
+    def __init__(self, path: str = DB_PATH):
+        import threading
+        self._path = path
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._create_tables()
+
+    def _create_tables(self):
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                donor       TEXT    NOT NULL,
+                msg_id      INTEGER NOT NULL,
+                album_id    TEXT,
+                text_snippet TEXT,
+                has_media   INTEGER DEFAULT 0,
+                category    TEXT,
+                confidence  INTEGER,
+                method      TEXT,
+                decision    TEXT,
+                error_msg   TEXT,
+                created_at  TEXT    NOT NULL,
+                UNIQUE(donor, msg_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_donor_msg  ON posts(donor, msg_id);
+            CREATE INDEX IF NOT EXISTS idx_decision   ON posts(decision);
+            CREATE INDEX IF NOT EXISTS idx_created    ON posts(created_at);
+        """)
+        self._conn.commit()
+
+    def is_seen(self, donor: str, msg_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT 1 FROM posts WHERE donor=? AND msg_id=? LIMIT 1", (donor, msg_id)
+            )
+            return cur.fetchone() is not None
+
+    def mark_seen(self, donor: str, msg_id: int, *, album_id: str = None,
+                  text_snippet: str = None, has_media: bool = False,
+                  category: str = None, confidence: int = None,
+                  method: str = None, decision: str = None, error_msg: str = None):
+        import datetime as _dt
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO posts
+                   (donor, msg_id, album_id, text_snippet, has_media,
+                    category, confidence, method, decision, error_msg, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (donor, msg_id, album_id,
+                 (text_snippet or "")[:200], int(has_media),
+                 category, confidence, method, decision, error_msg,
+                 _dt.datetime.utcnow().isoformat())
+            )
+            self._conn.commit()
+
+    def update_decision(self, donor: str, msg_id: int, decision: str,
+                        category: str = None, confidence: int = None,
+                        method: str = None, error_msg: str = None):
+        with self._lock:
+            self._conn.execute(
+                """UPDATE posts SET decision=?, category=?, confidence=?, method=?, error_msg=?
+                   WHERE donor=? AND msg_id=?""",
+                (decision, category, confidence, method, error_msg, donor, msg_id)
+            )
+            self._conn.commit()
+
+    def get_last_seen_id(self, donor: str) -> Optional[int]:
+        """Return highest msg_id seen for this donor (for incremental fetching)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT MAX(msg_id) FROM posts WHERE donor=?", (donor,)
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] is not None else None
+
+    def get_stats(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT decision, method, COUNT(*) FROM posts GROUP BY decision, method"
+            ).fetchall()
+            total = self._conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+            return {"total": total, "breakdown": [{"decision": r[0], "method": r[1], "count": r[2]} for r in rows]}
+
+    def close(self):
+        self._conn.close()
+
+
+# Global DB instance (created lazily)
+_post_db: Optional["PostDB"] = None
+
+def _get_post_db() -> "PostDB":
+    global _post_db
+    if _post_db is None:
+        _post_db = PostDB()
+    return _post_db
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get_drive_root() -> str:
@@ -636,7 +742,10 @@ def _add_uran_footer(text: str) -> str:
 
 
 async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) -> list:
-    """Send post as own message (not a forward), preserving media. Returns list of sent messages."""
+    """Send post as own message (not a forward), preserving media. Returns list of sent messages.
+    Tries HTML parse mode first, falls back to plaintext on parse errors from Telegram API.
+    """
+    from pyrogram import enums
     from pyrogram.types import InputMediaPhoto, InputMediaVideo
 
     cleaned = await _clean_post_text(text)
@@ -647,35 +756,43 @@ async def _send_as_own_message(app, target_chat_id: int, msgs: list, text: str) 
     cleaned = _add_uran_footer(cleaned)
     caption_text = cleaned if cleaned else None
 
-    if len(msgs) == 1:
-        msg = msgs[0]
-        if msg.photo:
-            sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=caption_text, parse_mode="html")
-        elif msg.video:
-            sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=caption_text, parse_mode="html")
-        elif msg.animation:
-            sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=caption_text, parse_mode="html")
-        elif msg.document:
-            sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=caption_text, parse_mode="html")
-        else:
-            sent = await app.send_message(target_chat_id, cleaned, parse_mode="html") if cleaned else None
-        return [sent] if sent else []
+    async def _try_send(parse_mode):
+        """Attempt send with given parse_mode. Returns sent messages list."""
+        if len(msgs) == 1:
+            msg = msgs[0]
+            if msg.photo:
+                sent = await app.send_photo(target_chat_id, photo=msg.photo.file_id, caption=caption_text, parse_mode=parse_mode)
+            elif msg.video:
+                sent = await app.send_video(target_chat_id, video=msg.video.file_id, caption=caption_text, parse_mode=parse_mode)
+            elif msg.animation:
+                sent = await app.send_animation(target_chat_id, animation=msg.animation.file_id, caption=caption_text, parse_mode=parse_mode)
+            elif msg.document:
+                sent = await app.send_document(target_chat_id, document=msg.document.file_id, caption=caption_text, parse_mode=parse_mode)
+            else:
+                sent = await app.send_message(target_chat_id, cleaned, parse_mode=parse_mode) if cleaned else None
+            return [sent] if sent else []
+        # Media group (album)
+        media = []
+        for i, m in enumerate(msgs):
+            cap = caption_text if i == 0 else None
+            if m.photo:
+                media.append(InputMediaPhoto(m.photo.file_id, caption=cap, parse_mode=parse_mode))
+            elif m.video:
+                media.append(InputMediaVideo(m.video.file_id, caption=cap, parse_mode=parse_mode))
+        if not media:
+            sent = await app.send_message(target_chat_id, cleaned, parse_mode=parse_mode) if cleaned else None
+            return [sent] if sent else []
+        sent_list = await app.send_media_group(target_chat_id, media=media)
+        return sent_list if isinstance(sent_list, list) else [sent_list]
 
-    # Media group (album)
-    media = []
-    for i, msg in enumerate(msgs):
-        cap = caption_text if i == 0 else None
-        if msg.photo:
-            media.append(InputMediaPhoto(msg.photo.file_id, caption=cap, parse_mode="html"))
-        elif msg.video:
-            media.append(InputMediaVideo(msg.video.file_id, caption=cap, parse_mode="html"))
-
-    if not media:
-        sent = await app.send_message(target_chat_id, cleaned, parse_mode="html") if cleaned else None
-        return [sent] if sent else []
-
-    sent_list = await app.send_media_group(target_chat_id, media=media)
-    return sent_list if isinstance(sent_list, list) else [sent_list]
+    try:
+        return await _try_send(enums.ParseMode.HTML)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "parse mode" in err_str or "bad request" in err_str or "can't parse" in err_str:
+            log.warning(f"[buffer] HTML parse_mode rejected by Telegram, retrying as DISABLED: {e!r}")
+            return await _try_send(enums.ParseMode.DISABLED)
+        raise
 
 
 async def _warm_up_buffer_peer(app, target_chat_id: int, invite_link: str = BUFFER_INVITE_LINK) -> int:
@@ -709,176 +826,190 @@ def _write_init_progress(sent: int, total: int, last_post: str, started_at: str,
 async def _async_forward_posts(
     donors: List[str],
     target_chat_id: int,
-    limit_per_donor: int,
     total_limit: int,
     only_relevant: bool,
     hours_back: int,
+    batch_size: int = 5,
     progress_file: Optional[str] = None,
 ) -> Dict[str, Any]:
-    from pyrogram import Client
+    from pyrogram import Client, enums
     from pyrogram.errors import FloodWait
+    from pyrogram.types import InputMediaPhoto, InputMediaVideo
     from datetime import datetime, timedelta
     from collections import OrderedDict
 
     secrets = _load_pyrogram_secrets()
-    api_id = secrets["api_id"]
-    api_hash = secrets["api_hash"]
-    session_string = secrets["session_string"]
+    db = _get_post_db()
 
     started_at = datetime.utcnow().isoformat()
+    sent_total = 0
+    errors_total = 0
+    content_plan_counts: Dict[str, int] = {cat: 0 for cat in CONTENT_PLAN}
+    allocations: Dict[str, int] = {
+        cat: round(total_limit * frac) for cat, frac in CONTENT_PLAN.items()
+    }
 
-    forwarded = []
-    errors = []
+    def _write_progress(status: str, last_text: str = ""):
+        try:
+            with open(progress_file or "/tmp/init_buffer_progress.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "status": status,
+                    "sent": sent_total,
+                    "total": total_limit,
+                    "last_post": (last_text or "")[:120],
+                    "errors": errors_total,
+                    "db_stats": db.get_stats(),
+                }, f, ensure_ascii=False)
+        except Exception:
+            pass
 
     async with Client(
         name="ouroboros_session",
-        api_id=api_id,
-        api_hash=api_hash,
-        session_string=session_string,
+        api_id=secrets["api_id"],
+        api_hash=secrets["api_hash"],
+        session_string=secrets["session_string"],
         no_updates=True,
     ) as app:
-        # Warm up peer cache via invite link
         target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
-
-        # Phase 1: collect all raw candidates from all donors (no LLM calls yet)
-        # Each entry: (donor, gid, msgs, text, rep_msg_id)
-        raw_candidates: List[tuple] = []
+        _write_progress("running", "Connected, starting...")
 
         for donor in donors:
+            if sent_total >= total_limit:
+                break
+
             cfg = DONOR_FETCH_CONFIG.get(donor, DONOR_DEFAULT_CONFIG)
-            donor_limit = cfg["limit"]
-            donor_cutoff = datetime.utcnow() - timedelta(hours=cfg["hours_back"])
+            cutoff = datetime.utcnow() - timedelta(hours=hours_back)
+
+            # Fetch all raw messages from donor (newest first), group albums
+            raw_messages = []
             try:
-                raw_messages = []
-                async for msg in app.get_chat_history(donor, limit=donor_limit):
-                    if msg.date and msg.date < donor_cutoff:
-                        break  # history is newest-first; once past cutoff, stop
+                async for msg in app.get_chat_history(donor, limit=cfg["limit"]):
+                    if msg.date and msg.date < cutoff:
+                        break
                     if not (msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.animation):
                         continue
                     raw_messages.append(msg)
+            except Exception as e:
+                log.warning(f"[buffer] fetch error from {donor}: {e!r}")
+                errors_total += 1
+                continue
 
-                groups: OrderedDict = OrderedDict()
-                for msg in reversed(raw_messages):  # oldest first
-                    gid = msg.media_group_id if msg.media_group_id else f"single_{msg.id}"
-                    if gid not in groups:
-                        groups[gid] = []
-                    groups[gid].append(msg)
+            # Group into albums (oldest first)
+            groups: OrderedDict = OrderedDict()
+            for msg in reversed(raw_messages):
+                gid = msg.media_group_id if msg.media_group_id else f"single_{msg.id}"
+                if gid not in groups:
+                    groups[gid] = []
+                groups[gid].append(msg)
 
-                for gid, msgs in groups.items():
-                    rep_msg = msgs[0]
-                    text = rep_msg.text or rep_msg.caption or ""
-                    for m in msgs[1:]:
-                        if m.text or m.caption:
-                            text = m.text or m.caption
-                            break
+            # Build list of (gid, msgs, representative_msg_id, text)
+            all_groups = []
+            for gid, msgs in groups.items():
+                rep = msgs[0]
+                text = rep.text or rep.caption or ""
+                for m in msgs[1:]:
+                    if m.text or m.caption:
+                        text = m.text or m.caption
+                        break
+                all_groups.append((gid, msgs, rep.id, text))
 
-                    # Ad pre-filter: skip immediately without calling LLM
+            # Sort: media first
+            all_groups.sort(key=lambda x: 0 if any(m.photo or m.video or m.document or m.animation for m in x[1]) else 1)
+
+            # Process in chunks of batch_size
+            for chunk_start in range(0, len(all_groups), batch_size):
+                if sent_total >= total_limit:
+                    break
+
+                chunk = all_groups[chunk_start:chunk_start + batch_size]
+
+                # Classify chunk in parallel
+                async def _classify_one(gid, msgs, rep_id, text):
+                    # Skip already seen
+                    if db.is_seen(donor, rep_id):
+                        return None
+
+                    # Ad pre-filter (no LLM)
                     if _is_advertisement(text):
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=bool(msgs[0].photo or msgs[0].video),
+                                     decision="filtered", method="regex")
+                        log.debug(f"[buffer] SKIP {donor}/{rep_id} filtered:ad regex")
+                        return None
+
+                    # Strict donor check (no LLM)
+                    if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=bool(msgs[0].photo or msgs[0].video),
+                                     decision="filtered", method="regex")
+                        log.debug(f"[buffer] SKIP {donor}/{rep_id} filtered:strict_donor regex")
+                        return None
+
+                    # LLM classify + categorize
+                    try:
+                        ok, cat = await _llm_classify_and_categorize(text, msg_id=rep_id)
+                        method = "llm"
+                    except Exception as e:
+                        log.warning(f"[buffer] LLM failed for {donor}/{rep_id}: {e!r}")
+                        ok = _is_strictly_relevant(text)
+                        cat = "BATTLE"
+                        method = "fallback"
+
+                    return (gid, msgs, rep_id, text, ok, cat, method)
+
+                classify_tasks = [_classify_one(gid, msgs, rep_id, text) for gid, msgs, rep_id, text in chunk]
+                results = await asyncio.gather(*classify_tasks, return_exceptions=True)
+
+                # Send accepted posts
+                for r in results:
+                    if sent_total >= total_limit:
+                        break
+                    if r is None or isinstance(r, Exception):
                         continue
 
-                    raw_candidates.append((donor, gid, msgs, text, rep_msg.id))
+                    gid, msgs, rep_id, text, ok, cat, method = r
+                    has_media = bool(msgs[0].photo or msgs[0].video or msgs[0].document or msgs[0].animation)
 
-            except Exception as e:
-                errors.append({"donor": donor, "error": repr(e)})
+                    if not ok:
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=has_media, category=cat,
+                                     decision="skipped", method=method)
+                        log.info(f"[buffer] SKIP {donor}/{rep_id} cat={cat} method={method}")
+                        continue
 
-            if progress_file:
-                _write_init_progress(0, total_limit, f"Collecting from {donor}...", started_at, "running")
+                    # Content plan quota (soft)
+                    effective_cat = cat
+                    if content_plan_counts.get(cat, 0) >= allocations.get(cat, 999):
+                        if cat != "BATTLE":
+                            effective_cat = "BATTLE"
 
-        # Sort: media posts first, then text-only
-        raw_candidates.sort(
-            key=lambda x: 0 if any(m.photo or m.video or m.document or m.animation for m in x[2]) else 1
-        )
+                    # Send
+                    try:
+                        await _send_as_own_message(app, target_chat_id, msgs, text)
+                        sent_total += 1
+                        content_plan_counts[effective_cat] = content_plan_counts.get(effective_cat, 0) + 1
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=has_media, category=effective_cat,
+                                     decision="sent", method=method)
+                        log.info(f"[buffer] SENT {donor}/{rep_id} cat={effective_cat} method={method} ({sent_total}/{total_limit})")
+                        _write_progress("running", text)
+                        await asyncio.sleep(1.5)
+                    except FloodWait as e:
+                        log.warning(f"[buffer] FloodWait {e.value}s")
+                        await asyncio.sleep(e.value + 2)
+                        errors_total += 1
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=has_media, decision="error",
+                                     error_msg=f"FloodWait {e.value}s", method=method)
+                    except Exception as e:
+                        log.error(f"[buffer] SEND ERROR {donor}/{rep_id}: {e!r}")
+                        errors_total += 1
+                        db.mark_seen(donor, rep_id, album_id=gid, text_snippet=text,
+                                     has_media=has_media, decision="error",
+                                     error_msg=repr(e)[:200], method=method)
 
-        # Pre-compute per-category slot allocations based on CONTENT_PLAN
-        allocations: Dict[str, int] = {
-            cat: round(total_limit * frac) for cat, frac in CONTENT_PLAN.items()
-        }
-        allocations["OTHER"] = max(0, total_limit - sum(allocations.values()))
-
-        content_plan_counts: Dict[str, int] = {cat: 0 for cat in allocations}
-        per_donor_counts: Dict[str, int] = {}
-
-        if progress_file:
-            _write_init_progress(0, total_limit, f"Classifying {len(raw_candidates)} candidates...", started_at, "running")
-
-        # Phase 2a: classify all candidates in parallel (batches of 8 to avoid OOM on Ollama)
-        async def _classify_single(candidate):
-            donor, gid, msgs, text, rep_id = candidate
-            if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
-                return None
-            ok, cat = await _llm_classify_and_categorize(text, msg_id=rep_id)
-            return (donor, gid, msgs, text, rep_id, ok, cat)
-
-        classified: list = []
-        batch_size = 8
-        for i in range(0, len(raw_candidates), batch_size):
-            batch = raw_candidates[i:i+batch_size]
-            batch_results = await asyncio.gather(
-                *[_classify_single(c) for c in batch],
-                return_exceptions=True,
-            )
-            for r in batch_results:
-                if isinstance(r, Exception) or r is None:
-                    continue
-                classified.append(r)
-            if progress_file:
-                _write_init_progress(0, total_limit, f"Classified {min(i+batch_size, len(raw_candidates))}/{len(raw_candidates)}...", started_at, "running")
-
-        # Phase 2b: send classified posts sequentially (FloodWait-safe, order-preserving)
-        for donor, gid, msgs, text, rep_id, ok, cat in classified:
-            if len(forwarded) >= total_limit:
-                break
-
-            # Per-donor limit
-            if per_donor_counts.get(donor, 0) >= limit_per_donor:
-                continue
-
-            if only_relevant and not ok:
-                continue
-
-            # Enforce content plan quota (soft — BATTLE is the unlimited fallback)
-            cat_quota = allocations.get(cat, 0)
-            if content_plan_counts.get(cat, 0) >= cat_quota:
-                if cat != "BATTLE":
-                    # Non-BATTLE quota full → redirect to BATTLE (content plan is a guideline, not hard cap)
-                    cat = "BATTLE"
-                # BATTLE has no hard cap — always allowed if total_limit not reached
-
-            message_ids = [m.id for m in msgs]
-            rep_msg = msgs[0]
-            try:
-                text = str(text) if text is not None else ""
-                await _send_as_own_message(app, target_chat_id, msgs, text)
-
-                per_donor_counts[donor] = per_donor_counts.get(donor, 0) + 1
-                content_plan_counts[cat] = content_plan_counts.get(cat, 0) + 1
-
-                forwarded.append({
-                    "donor": donor,
-                    "msg_ids": message_ids,
-                    "media_group_id": gid if not gid.startswith("single_") else None,
-                    "date": rep_msg.date.isoformat() if rep_msg.date else "",
-                    "text_preview": text[:80],
-                    "count_in_group": len(msgs),
-                })
-
-                if progress_file:
-                    _write_init_progress(len(forwarded), total_limit, text[:120], started_at, "running")
-
-                log.info(f"[forward_posts] sent {len(forwarded)}/{total_limit} — {donor} cat={cat}")
-                await asyncio.sleep(1.5)
-
-            except FloodWait as e:
-                log.warning(f"FloodWait {e.value}s from {donor}")
-                await asyncio.sleep(e.value + 2)
-            except Exception as e:
-                errors.append({"donor": donor, "msg_ids": message_ids, "error": repr(e)})
-
-    return {
-        "forwarded_count": len(forwarded),
-        "forwarded": forwarded,
-        "errors": errors,
-    }
+    _write_progress("done")
+    return {"forwarded_count": sent_total, "errors": errors_total}
 
 
 # ── Tool implementations ───────────────────────────────────────────────────────
@@ -886,10 +1017,10 @@ async def _async_forward_posts(
 def _forward_posts_to_buffer(
     ctx: ToolContext,
     donors: Optional[List[str]] = None,
-    limit_per_donor: int = 5,
     total_limit: int = 15,
     only_relevant: bool = True,
     hours_back: int = 26,
+    batch_size: int = 5,
     target_chat_id: int = BUFFER_CHANNEL_ID,
 ) -> str:
     """
@@ -904,10 +1035,10 @@ def _forward_posts_to_buffer(
             _async_forward_posts(
                 donors=donors,
                 target_chat_id=target_chat_id,
-                limit_per_donor=limit_per_donor,
                 total_limit=total_limit,
                 only_relevant=only_relevant,
                 hours_back=hours_back,
+                batch_size=batch_size,
             )
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -1053,7 +1184,7 @@ def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL
     return json.dumps(val, ensure_ascii=False)
 
 
-def _launch_buffer_subprocess(total_posts: int = 70, hours_back: int = 168) -> int:
+def _launch_buffer_subprocess(total_posts: int = 70, hours_back: int = 168, batch_size: int = 5) -> int:
     """Launch buffer fill as an independent subprocess. Returns PID."""
     import subprocess, textwrap
 
@@ -1067,16 +1198,16 @@ async def main():
     result = await _async_forward_posts(
         donors=DONOR_CHANNELS,
         target_chat_id=BUFFER_CHANNEL_ID,
-        limit_per_donor=30,
         total_limit={total_posts},
         only_relevant=True,
         hours_back={hours_back},
+        batch_size={batch_size},
         progress_file='{_BUFFER_PROGRESS_FILE}',
     )
     import json
     with open('{_BUFFER_PROGRESS_FILE}', 'w', encoding='utf-8') as f:
-        json.dump({{'status': 'done', 'sent': result['forwarded_count'], 'errors': len(result['errors'])}}, f)
-    print(f"Buffer fill complete: {{result['forwarded_count']}} posts sent, {{len(result['errors'])}} errors")
+        json.dump({{'status': 'done', 'sent': result['forwarded_count'], 'errors': result['errors']}}, f)
+    print(f"Buffer fill complete: {{result['forwarded_count']}} posts sent, {{result['errors']}} errors")
 
 asyncio.run(main())
 """)
@@ -1093,7 +1224,7 @@ asyncio.run(main())
     return proc.pid
 
 
-def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168) -> str:
+def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, batch_size: int = 5) -> str:
     """
     Initialize the buffer channel with posts from donor channels.
     Launches as an independent subprocess — returns immediately, fill happens in background.
@@ -1111,7 +1242,7 @@ def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168)
             'pid': 0,
         }, f)
 
-    pid = _launch_buffer_subprocess(total_posts=total_posts, hours_back=hours_back)
+    pid = _launch_buffer_subprocess(total_posts=total_posts, hours_back=hours_back, batch_size=batch_size)
 
     with open(_BUFFER_PROGRESS_FILE, 'w', encoding='utf-8') as f:
         json.dump({
@@ -1187,10 +1318,10 @@ def _start_daily_scheduler():
                         result = loop.run_until_complete(_async_forward_posts(
                             donors=DONOR_CHANNELS,
                             target_chat_id=BUFFER_CHANNEL_ID,
-                            limit_per_donor=5,
                             total_limit=15,
                             only_relevant=True,
                             hours_back=26,
+                            batch_size=5,
                         ))
                         log.info(f"Daily scheduler completed: {result}")
                     except Exception as e:
@@ -1319,6 +1450,10 @@ def get_tools() -> List[ToolEntry]:
                     "hours_back": {
                         "type": "integer",
                         "description": "How many hours back to look for posts (default: 168 = 7 days)",
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "description": "Posts per fetch chunk (default: 5). Use 5 for debugging, 20 for production.",
                     },
                 },
                 "required": [],
