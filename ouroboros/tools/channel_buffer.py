@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import sys
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -970,47 +971,46 @@ def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL
 
 
 def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
-    """Launch buffer initialization in a daemon thread. Progress: /tmp/init_buffer_progress.json"""
-    import threading
+    """Launch buffer initialization as an independent subprocess. Progress: /tmp/init_buffer_progress.json"""
+    import subprocess
 
-    def _thread_main():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        started_at = datetime.datetime.utcnow().isoformat()
-        _write_init_progress(0, total_posts, "", started_at, "running")
-        try:
-            loop.run_until_complete(_async_clear_buffer(target_chat_id))
-            log.info("Buffer cleared, starting forward_posts...")
-            # Warm up Ollama — loads model into VRAM, keeps it alive for 1h
-            loop.run_until_complete(_warmup_ollama())
-            log.info("[init_buffer] Ollama warmed up, starting collection...")
-            result = loop.run_until_complete(_async_forward_posts(
-                donors=DONOR_CHANNELS,
-                target_chat_id=target_chat_id,
-                limit_per_donor=max(30, total_posts // len(DONOR_CHANNELS) + 5),
-                total_limit=total_posts,
-                only_relevant=True,
-                hours_back=hours_back,
-                progress_file="/tmp/init_buffer_progress.json",
-            ))
-            sent = result.get("forwarded_count", 0)
-            last_post = result["forwarded"][-1]["text_preview"] if result.get("forwarded") else ""
-            _write_init_progress(sent, total_posts, last_post, started_at, "done")
-            log.info("init_buffer background thread completed successfully")
-        except Exception as e:
-            _write_init_progress(0, total_posts, "", started_at, "error")
-            log.error(f"init_buffer background thread error: {e!r}")
-        finally:
-            loop.close()
+    progress_file = "/tmp/init_buffer_progress.json"
+    script = "/home/ouroboros/app/repo/scripts/run_init_buffer.py"
+    log_file = "/tmp/init_buffer_subprocess.log"
 
-    t = threading.Thread(target=_thread_main, daemon=True, name="init_buffer_thread")
-    t.start()
+    # Kill any existing init_buffer subprocess
+    try:
+        subprocess.run(["pkill", "-f", "run_init_buffer.py"], capture_output=True)
+    except Exception:
+        pass
+
+    # Write initial progress
+    started_at = datetime.datetime.utcnow().isoformat()
+    _write_init_progress(0, total_posts, "", started_at, "starting")
+
+    # Prepare environment with repo path
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "/home/ouroboros/app/repo"
+
+    # Launch as subprocess (NOT daemon thread — lives independently)
+    with open(log_file, "w") as logf:
+        proc = subprocess.Popen(
+            [sys.executable, script, str(total_posts), str(hours_back), str(target_chat_id), progress_file],
+            stdout=logf,
+            stderr=logf,
+            env=env,
+            start_new_session=True,  # detach from parent process group
+        )
+
+    log.info(f"[init_buffer] Launched subprocess PID={proc.pid}")
+
     return {
         "status": "started",
+        "pid": proc.pid,
         "message": (
-            f"Buffer initialization started in background. "
+            f"Buffer initialization started as subprocess PID={proc.pid}. "
             f"Will fill ~{total_posts} posts from last {hours_back}h. "
-            "Posts appear gradually every ~10-30s. Track progress: /tmp/init_buffer_progress.json"
+            f"Posts appear gradually every ~15-30s. Track progress: {progress_file}"
         ),
     }
 
