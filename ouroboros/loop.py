@@ -18,7 +18,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import (
+    LLMClient, normalize_reasoning_effort, add_usage,
+    is_ollama_available, warmup_ollama, OLLAMA_MODEL, OLLAMA_BASE_URL,
+)
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
@@ -109,6 +112,55 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
         + completion_tokens * output_price / 1_000_000
     )
     return round(cost, 6)
+
+OLLAMA_FALLBACK_THRESHOLD = 2.0  # USD — switch to local Ollama when budget drops below this
+OLLAMA_FALLBACK_KEY = "ollama"   # dummy API key accepted by Ollama
+
+_ollama_client: Optional[LLMClient] = None
+_ollama_warmed_up = False
+_ollama_warmup_lock = threading.Lock()
+
+
+def _get_effective_llm_and_model(
+    llm: LLMClient,
+    model: str,
+    budget_remaining_usd: Optional[float],
+    accumulated_cost: float = 0.0,
+) -> Tuple[LLMClient, str, bool]:
+    """Returns (effective_llm, effective_model, using_ollama).
+
+    Switches to local Ollama when effective remaining budget < OLLAMA_FALLBACK_THRESHOLD.
+    Falls back to original llm/model if Ollama is unreachable.
+    """
+    global _ollama_client, _ollama_warmed_up
+
+    if budget_remaining_usd is None:
+        return llm, model, False
+
+    effective_remaining = budget_remaining_usd - accumulated_cost
+    if effective_remaining >= OLLAMA_FALLBACK_THRESHOLD:
+        return llm, model, False
+
+    if not is_ollama_available():
+        return llm, model, False
+
+    if _ollama_client is None:
+        _ollama_client = LLMClient(
+            api_key=OLLAMA_FALLBACK_KEY,
+            base_url=OLLAMA_BASE_URL,
+            is_local=True,
+        )
+
+    # Warmup model into VRAM once per process
+    if not _ollama_warmed_up:
+        with _ollama_warmup_lock:
+            if not _ollama_warmed_up:
+                log.info("[OLLAMA FALLBACK] Warming up %s...", OLLAMA_MODEL)
+                warmup_ollama()
+                _ollama_warmed_up = True
+
+    return _ollama_client, OLLAMA_MODEL, True
+
 
 READ_ONLY_PARALLEL_TOOLS = frozenset({
     "repo_read", "repo_list",
@@ -690,9 +742,17 @@ def run_llm_loop(
                 if len(messages) > 60:
                     messages = compact_tool_history(messages, keep_recent=6)
 
+            # --- Ollama fallback when budget is low ---
+            eff_llm, eff_model, using_ollama = _get_effective_llm_and_model(
+                llm, active_model, budget_remaining_usd,
+                accumulated_usage.get("cost", 0.0)
+            )
+            if using_ollama and round_idx == 1:
+                emit_progress("⚡ Budget < $2 — switching to local Ollama (qwen3.5:35b). Quality may differ but no downtime.")
+
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
-                llm, messages, active_model, tool_schemas, active_effort,
+                eff_llm, messages, eff_model, tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
             )
 
