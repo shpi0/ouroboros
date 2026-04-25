@@ -40,6 +40,17 @@ DONOR_CHANNELS = [
     "roscosmos_gk",
 ]
 
+# Per-donor fetch config: how many posts and how many hours back to look
+# warhistoryalconafter (Kirill Fedorov) = primary donor: take all posts for last week
+# Others: take last 30-50 posts within last 2-3 days
+DONOR_FETCH_CONFIG: Dict[str, Dict[str, int]] = {
+    "warhistoryalconafter":  {"limit": 200, "hours_back": 168},  # primary: full week
+    "Vspomni_o_Voine_neraz": {"limit": 40,  "hours_back": 72},
+    "zloy_zhurnalist":       {"limit": 40,  "hours_back": 72},
+    "roscosmos_gk":          {"limit": 30,  "hours_back": 72},
+}
+DONOR_DEFAULT_CONFIG = {"limit": 40, "hours_back": 72}
+
 # Topics to select
 TOPIC_KEYWORDS = [
     "боевые", "обстрел", "наступлен", "оборон", "фронт", "операци",
@@ -714,7 +725,6 @@ async def _async_forward_posts(
     api_hash = secrets["api_hash"]
     session_string = secrets["session_string"]
 
-    cutoff = datetime.utcnow() - timedelta(hours=hours_back)
     started_at = datetime.utcnow().isoformat()
 
     forwarded = []
@@ -735,10 +745,13 @@ async def _async_forward_posts(
         raw_candidates: List[tuple] = []
 
         for donor in donors:
+            cfg = DONOR_FETCH_CONFIG.get(donor, DONOR_DEFAULT_CONFIG)
+            donor_limit = cfg["limit"]
+            donor_cutoff = datetime.utcnow() - timedelta(hours=cfg["hours_back"])
             try:
                 raw_messages = []
-                async for msg in app.get_chat_history(donor, limit=50):
-                    if msg.date and msg.date < cutoff:
+                async for msg in app.get_chat_history(donor, limit=donor_limit):
+                    if msg.date and msg.date < donor_cutoff:
                         break  # history is newest-first; once past cutoff, stop
                     if not (msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.animation):
                         continue
@@ -788,8 +801,31 @@ async def _async_forward_posts(
         if progress_file:
             _write_init_progress(0, total_limit, f"Classifying {len(raw_candidates)} candidates...", started_at, "running")
 
-        # Phase 2: process candidates one by one — classify, categorize, send immediately
-        for donor, gid, msgs, text, rep_id in raw_candidates:
+        # Phase 2a: classify all candidates in parallel (batches of 8 to avoid OOM on Ollama)
+        async def _classify_single(candidate):
+            donor, gid, msgs, text, rep_id = candidate
+            if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
+                return None
+            ok, cat = await _llm_classify_and_categorize(text, msg_id=rep_id)
+            return (donor, gid, msgs, text, rep_id, ok, cat)
+
+        classified: list = []
+        batch_size = 8
+        for i in range(0, len(raw_candidates), batch_size):
+            batch = raw_candidates[i:i+batch_size]
+            batch_results = await asyncio.gather(
+                *[_classify_single(c) for c in batch],
+                return_exceptions=True,
+            )
+            for r in batch_results:
+                if isinstance(r, Exception) or r is None:
+                    continue
+                classified.append(r)
+            if progress_file:
+                _write_init_progress(0, total_limit, f"Classified {min(i+batch_size, len(raw_candidates))}/{len(raw_candidates)}...", started_at, "running")
+
+        # Phase 2b: send classified posts sequentially (FloodWait-safe, order-preserving)
+        for donor, gid, msgs, text, rep_id, ok, cat in classified:
             if len(forwarded) >= total_limit:
                 break
 
@@ -797,12 +833,6 @@ async def _async_forward_posts(
             if per_donor_counts.get(donor, 0) >= limit_per_donor:
                 continue
 
-            # STRICT_FILTER_DONORS: skip irrelevant posts from broad-topic channels without LLM
-            if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
-                continue
-
-            # Combined LLM: relevance + category in ONE call
-            ok, cat = await _llm_classify_and_categorize(text, msg_id=rep_id)
             if only_relevant and not ok:
                 continue
 
