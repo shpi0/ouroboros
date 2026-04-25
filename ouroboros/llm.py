@@ -293,3 +293,38 @@ class LLMClient:
         if light and light != main and light != code:
             models.append(light)
         return models
+
+
+# ----------------------------
+# Ollama fallback (referenced by ouroboros/loop.py)
+# ----------------------------
+# Minimal probe-based stubs. loop.py was importing these before the
+# implementation landed in this module, breaking import_test. Override
+# OLLAMA_BASE_URL / OLLAMA_MODEL via env when needed.
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
+
+
+def is_ollama_available(timeout: float = 2.0) -> bool:
+    """True iff GET {OLLAMA_BASE_URL}/api/version responds 200 within timeout."""
+    try:
+        import requests
+        r = requests.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/version", timeout=timeout)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def warmup_ollama(keep_alive: str = "1h") -> None:
+    """Best-effort: load OLLAMA_MODEL into VRAM and pin it. Silent on failure."""
+    try:
+        import requests
+        requests.post(
+            f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+            json={"model": OLLAMA_MODEL, "keep_alive": keep_alive, "prompt": ""},
+            timeout=10,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("warmup_ollama failed: %s", e)
