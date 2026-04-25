@@ -1191,7 +1191,7 @@ def _launch_buffer_subprocess(total_posts: int = 70, hours_back: int = 168, batc
     runner_code = textwrap.dedent(f"""
 import asyncio, sys, os
 sys.path.insert(0, '/home/ouroboros/app/repo')
-os.environ.setdefault('PYTHONPATH', '/home/ouroboros/app/repo')
+os.environ['PYTHONPATH'] = '/home/ouroboros/app/repo'
 
 async def main():
     from ouroboros.tools.channel_buffer import _async_forward_posts, DONOR_CHANNELS, BUFFER_CHANNEL_ID
