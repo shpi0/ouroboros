@@ -17,6 +17,37 @@ from supervisor.state import load_state, save_state, append_jsonl
 
 log = logging.getLogger(__name__)
 
+import threading as _threading
+_web_ctx = _threading.local()
+
+def set_web_session(session_id: str, msg_id: str = "") -> None:
+    """Call before handle_chat_direct to tag responses for web."""
+    _web_ctx.session_id = session_id
+    _web_ctx.msg_id = msg_id
+
+def clear_web_session() -> None:
+    _web_ctx.session_id = None
+    _web_ctx.msg_id = None
+
+def _write_web_outbox(text: str) -> None:
+    """Mirror agent response to web_outbox.jsonl if a web session is active."""
+    sid = getattr(_web_ctx, "session_id", None)
+    if not sid:
+        return
+    import json, time as _t
+    entry = json.dumps({
+        "session_id": sid,
+        "msg_id": getattr(_web_ctx, "msg_id", ""),
+        "text": text,
+        "ts": _t.time(),
+    }, ensure_ascii=False)
+    try:
+        outbox = DRIVE_ROOT / "web_outbox.jsonl"
+        with open(str(outbox), "a", encoding="utf-8") as _f:
+            _f.write(entry + "\n")
+    except Exception as _e:
+        pass  # don't break Telegram sending if web fails
+
 
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
@@ -495,6 +526,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             full = budget
         else:
             full = base + "\n\n" + budget
+
+    # Mirror to web if web session is active
+    if not is_progress:
+        _write_web_outbox(_text)
 
     if fmt == "markdown":
         ok, err = _send_markdown_telegram(chat_id, full)

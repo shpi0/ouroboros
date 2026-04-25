@@ -729,4 +729,44 @@ while True:
         _last_diag_heartbeat_ts = now_epoch
 
     _loop_sleep = 0.1 if (_now - _last_message_ts) < _ACTIVE_MODE_SEC else 0.5
+
+    # --- Web inbox polling ---
+    _web_inbox = DRIVE_ROOT / "web_inbox.jsonl"
+    if _web_inbox.exists() and _web_inbox.stat().st_size > 0:
+        try:
+            import json as _json
+            lines = _web_inbox.read_text(encoding="utf-8").strip().splitlines()
+            _web_inbox.write_text("", encoding="utf-8")  # clear
+            for _line in lines:
+                if not _line.strip():
+                    continue
+                try:
+                    _wmsg = _json.loads(_line)
+                except Exception:
+                    continue
+                _web_text = _wmsg.get("text", "").strip()
+                _web_session = _wmsg.get("session_id", "main")
+                _web_msg_id = _wmsg.get("msg_id", "")
+                if not _web_text:
+                    continue
+                log.info("Web inbox: session=%s text=%r", _web_session, _web_text[:80])
+
+                from supervisor.telegram import set_web_session, clear_web_session
+
+                def _run_web_chat(txt=_web_text, sid=_web_session, mid=_web_msg_id):
+                    try:
+                        set_web_session(sid, mid)
+                        _owner_chat_id = st.get("owner_chat_id") or st.get("owner_id")
+                        if _owner_chat_id:
+                            handle_chat_direct(int(_owner_chat_id), txt, None)
+                    except Exception as _e:
+                        log.warning("Web chat error: %s", _e)
+                    finally:
+                        clear_web_session()
+
+                _wt = threading.Thread(target=_run_web_chat, daemon=True)
+                _wt.start()
+        except Exception as _web_ex:
+            log.warning("Web inbox poll error: %s", _web_ex)
+
     time.sleep(_loop_sleep)
