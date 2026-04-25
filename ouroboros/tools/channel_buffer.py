@@ -99,6 +99,9 @@ CONTENT_PLAN: Dict[str, float] = {
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
 
+_BUFFER_RUNNER_PATH = "/tmp/ouroboros_buffer_runner.py"
+_BUFFER_PROGRESS_FILE = "/tmp/init_buffer_progress.json"
+
 
 async def _warmup_ollama() -> None:
     """Load model into VRAM and keep it alive for 1h. Call before batch processing."""
@@ -970,63 +973,110 @@ def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL
     return json.dumps(val, ensure_ascii=False)
 
 
-def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
-    """Launch buffer initialization as an independent subprocess. Progress: /tmp/init_buffer_progress.json"""
-    import subprocess
+def _launch_buffer_subprocess(total_posts: int = 70, hours_back: int = 168) -> int:
+    """Launch buffer fill as an independent subprocess. Returns PID."""
+    import subprocess, textwrap
 
-    progress_file = "/tmp/init_buffer_progress.json"
-    script = "/home/ouroboros/app/repo/scripts/run_init_buffer.py"
-    log_file = "/tmp/init_buffer_subprocess.log"
+    runner_code = textwrap.dedent(f"""
+import asyncio, sys, os
+sys.path.insert(0, '/home/ouroboros/app/repo')
+os.environ.setdefault('PYTHONPATH', '/home/ouroboros/app/repo')
 
-    # Kill any existing init_buffer subprocess
-    try:
-        subprocess.run(["pkill", "-f", "run_init_buffer.py"], capture_output=True)
-    except Exception:
-        pass
+async def main():
+    from ouroboros.tools.channel_buffer import _async_forward_posts, DONOR_CHANNELS, BUFFER_CHANNEL_ID
+    result = await _async_forward_posts(
+        donors=DONOR_CHANNELS,
+        target_chat_id=BUFFER_CHANNEL_ID,
+        limit_per_donor=30,
+        total_limit={total_posts},
+        only_relevant=True,
+        hours_back={hours_back},
+        progress_file='{_BUFFER_PROGRESS_FILE}',
+    )
+    import json
+    with open('{_BUFFER_PROGRESS_FILE}', 'w', encoding='utf-8') as f:
+        json.dump({{'status': 'done', 'sent': result['forwarded_count'], 'errors': len(result['errors'])}}, f)
+    print(f"Buffer fill complete: {{result['forwarded_count']}} posts sent, {{len(result['errors'])}} errors")
 
-    # Write initial progress
-    started_at = datetime.datetime.utcnow().isoformat()
-    _write_init_progress(0, total_posts, "", started_at, "starting")
+asyncio.run(main())
+""")
 
-    # Prepare environment with repo path
-    env = os.environ.copy()
-    env["PYTHONPATH"] = "/home/ouroboros/app/repo"
+    with open(_BUFFER_RUNNER_PATH, 'w', encoding='utf-8') as f:
+        f.write(runner_code)
 
-    # Launch as subprocess (NOT daemon thread — lives independently)
-    with open(log_file, "w") as logf:
-        proc = subprocess.Popen(
-            [sys.executable, script, str(total_posts), str(hours_back), str(target_chat_id), progress_file],
-            stdout=logf,
-            stderr=logf,
-            env=env,
-            start_new_session=True,  # detach from parent process group
-        )
-
-    log.info(f"[init_buffer] Launched subprocess PID={proc.pid}")
-
-    return {
-        "status": "started",
-        "pid": proc.pid,
-        "message": (
-            f"Buffer initialization started as subprocess PID={proc.pid}. "
-            f"Will fill ~{total_posts} posts from last {hours_back}h. "
-            f"Posts appear gradually every ~15-30s. Track progress: {progress_file}"
-        ),
-    }
+    proc = subprocess.Popen(
+        ['/home/ouroboros/app/venv/bin/python', _BUFFER_RUNNER_PATH],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return proc.pid
 
 
-def _check_buffer_progress(ctx: ToolContext) -> Dict[str, Any]:
-    """Check the current progress of buffer initialization."""
+def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168) -> str:
+    """
+    Initialize the buffer channel with posts from donor channels.
+    Launches as an independent subprocess — returns immediately, fill happens in background.
+    Track progress via check_buffer_progress tool.
+    """
     import os
-    progress_file = "/tmp/init_buffer_progress.json"
-    if not os.path.exists(progress_file):
-        return {"status": "not_started", "message": "No init_buffer running or no progress file found"}
+
+    with open(_BUFFER_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'status': 'starting',
+            'sent': 0,
+            'total': total_posts,
+            'current_text': '',
+            'started_at': '',
+            'pid': 0,
+        }, f)
+
+    pid = _launch_buffer_subprocess(total_posts=total_posts, hours_back=hours_back)
+
+    with open(_BUFFER_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'status': 'running',
+            'sent': 0,
+            'total': total_posts,
+            'current_text': 'Starting...',
+            'started_at': __import__('datetime').datetime.utcnow().isoformat(),
+            'pid': pid,
+        }, f)
+
+    return json.dumps({
+        'status': 'launched',
+        'pid': pid,
+        'total_posts': total_posts,
+        'hours_back': hours_back,
+        'progress_file': _BUFFER_PROGRESS_FILE,
+        'message': f'Buffer fill launched as subprocess PID {pid}. Use check_buffer_progress to track.'
+    }, ensure_ascii=False)
+
+
+def _check_buffer_progress(ctx: ToolContext) -> str:
+    """Check current status of buffer fill operation."""
+    import os
+
+    if not os.path.exists(_BUFFER_PROGRESS_FILE):
+        return json.dumps({'status': 'not_started', 'message': 'No buffer fill in progress'})
+
     try:
-        with open(progress_file, "r", encoding="utf-8") as f:
+        with open(_BUFFER_PROGRESS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        return data
     except Exception as e:
-        return {"status": "error", "message": f"Failed to read progress: {e!r}"}
+        return json.dumps({'status': 'error', 'message': f'Cannot read progress: {e}'})
+
+    pid = data.get('pid', 0)
+    if pid:
+        try:
+            os.kill(pid, 0)
+            data['process_alive'] = True
+        except (ProcessLookupError, PermissionError):
+            data['process_alive'] = False
+            if data.get('status') == 'running':
+                data['status'] = 'died'
+
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 # ── Daily scheduler ───────────────────────────────────────────────────────────
@@ -1174,21 +1224,21 @@ def get_tools() -> List[ToolEntry]:
 
         ToolEntry("init_buffer", {
             "name": "init_buffer",
-            "description": "Clear buffer and re-fill with ~70 relevant posts from donor channels (use for initialization or full reset)",
+            "description": (
+                "Fill the buffer channel with ~70 relevant posts from donor channels. "
+                "Launches as an independent subprocess — returns immediately. "
+                "Track progress with check_buffer_progress."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "total_posts": {
                         "type": "integer",
-                        "description": "Total posts to forward after clearing (default: 70)",
+                        "description": "Total posts to forward (default: 70)",
                     },
                     "hours_back": {
                         "type": "integer",
                         "description": "How many hours back to look for posts (default: 168 = 7 days)",
-                    },
-                    "target_chat_id": {
-                        "type": "integer",
-                        "description": "Target channel chat_id (default: -1003519809178 buffer)",
                     },
                 },
                 "required": [],
