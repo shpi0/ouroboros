@@ -553,6 +553,54 @@ async def _llm_get_post_category(text: str) -> str:
     return "OTHER"
 
 
+async def _llm_classify_and_categorize(text: str, msg_id: Optional[int] = None) -> tuple[bool, str]:
+    """Combined classify + categorize in ONE LLM call. Returns (is_relevant, category)."""
+    if not text or not text.strip():
+        return False, "OTHER"
+
+    # Pre-filters (no LLM needed)
+    if _is_negative_russia_news(text):
+        return False, "OTHER"
+    if _is_advertisement(text):
+        return False, "OTHER"
+
+    # Cache check
+    cache_key = msg_id if msg_id is not None else hash(text[:200])
+    if hasattr(_llm_classify_cache, '__contains__') and cache_key in _llm_classify_cache:
+        # Can't return category from old bool cache — skip cache
+        pass
+
+    system = (
+        "You are a content classifier for a Russian military Telegram channel @UranWar (Battalion URAN, Roscosmos).\n"
+        "Given a post, return JSON with two fields:\n"
+        "- ok: true if the post fits @UranWar (combat ops, military equipment, SVO updates, Roscosmos, battalion news, military history); false if it's ads, civilian tragedy in Russia, foreign politics unrelated to SVO, fundraising\n"
+        "- cat: content category. ONE of: BATTLE, ROSCOSMOS, HISTORY, URAN, HUMANITARIAN, OTHER\n"
+        "  BATTLE = combat ops, weapon destruction, drones, front lines, ВСУ losses\n"
+        "  ROSCOSMOS = Roscosmos news, space, humanitarian aid from Roscosmos\n"
+        "  HISTORY = WWII facts, historical anniversaries\n"
+        "  URAN = Battalion URAN news\n"
+        "  HUMANITARIAN = aid convoys, volunteer help\n"
+        "  OTHER = anything else relevant\n"
+        'Reply ONLY with JSON: {"ok": true, "cat": "BATTLE"}'
+    )
+    try:
+        raw = await _llm_call(system, text[:1500], max_tokens=30)
+        m = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            ok = bool(data.get("ok", False))
+            cat = str(data.get("cat", "OTHER")).upper()
+            valid_cats = {"BATTLE", "ROSCOSMOS", "HISTORY", "URAN", "HUMANITARIAN", "OTHER"}
+            if cat not in valid_cats:
+                cat = "OTHER"
+            return ok, cat
+    except Exception as e:
+        log.warning(f"LLM classify_and_categorize failed: {e!r}, falling back to keyword filter")
+        return _is_strictly_relevant(text), "BATTLE"
+
+    return _is_strictly_relevant(text), "BATTLE"
+
+
 async def _clean_post_text(text: str) -> str:
     """Clean post text via LLM: strip footers, neutralize slurs, censor profanity.
     Falls back to regex-only if LLM is unavailable."""
@@ -753,14 +801,10 @@ async def _async_forward_posts(
             if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
                 continue
 
-            # LLM relevance classification
-            if only_relevant:
-                ok = await _llm_classify_post(text, msg_id=rep_id)
-                if not ok:
-                    continue
-
-            # LLM category assignment
-            cat = await _llm_get_post_category(text)
+            # Combined LLM: relevance + category in ONE call
+            ok, cat = await _llm_classify_and_categorize(text, msg_id=rep_id)
+            if only_relevant and not ok:
+                continue
 
             # Enforce content plan quota (soft — BATTLE is the unlimited fallback)
             cat_quota = allocations.get(cat, 0)
