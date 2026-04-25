@@ -98,6 +98,26 @@ CONTENT_PLAN: Dict[str, float] = {
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:35b")
 
+
+async def _warmup_ollama() -> None:
+    """Load model into VRAM and keep it alive for 1h. Call before batch processing."""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            payload = {"model": OLLAMA_MODEL, "keep_alive": "1h", "prompt": ""}
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status == 200:
+                    log.info("[ollama] Model warmed up and kept alive for 1h")
+                else:
+                    log.warning("[ollama] Warmup failed: status %d", resp.status)
+    except Exception as e:
+        log.warning("[ollama] Warmup error (non-fatal): %s", e)
+
+
 # LLM classification cache: msg_id -> bool
 _llm_classify_cache: Dict[int, bool] = {}
 
@@ -989,6 +1009,9 @@ def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168,
         try:
             loop.run_until_complete(_async_clear_buffer(target_chat_id))
             log.info("Buffer cleared, starting forward_posts...")
+            # Warm up Ollama — loads model into VRAM, keeps it alive for 1h
+            loop.run_until_complete(_warmup_ollama())
+            log.info("[init_buffer] Ollama warmed up, starting collection...")
             loop.run_until_complete(_async_forward_posts(
                 donors=DONOR_CHANNELS,
                 target_chat_id=target_chat_id,
