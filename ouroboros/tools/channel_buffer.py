@@ -752,14 +752,13 @@ async def _async_forward_posts(
             # LLM category assignment
             cat = await _llm_get_post_category(text)
 
-            # Enforce content plan quota
+            # Enforce content plan quota (soft — BATTLE is the unlimited fallback)
             cat_quota = allocations.get(cat, 0)
             if content_plan_counts.get(cat, 0) >= cat_quota:
-                # If category quota full, try to put it in OTHER if OTHER has space
-                other_quota = allocations.get("OTHER", 0)
-                if cat == "OTHER" or content_plan_counts.get("OTHER", 0) >= other_quota:
-                    continue  # both category and OTHER full — skip
-                cat = "OTHER"  # redirect to OTHER bucket
+                if cat != "BATTLE":
+                    # Non-BATTLE quota full → redirect to BATTLE (content plan is a guideline, not hard cap)
+                    cat = "BATTLE"
+                # BATTLE has no hard cap — always allowed if total_limit not reached
 
             message_ids = [m.id for m in msgs]
             rep_msg = msgs[0]
