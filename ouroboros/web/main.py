@@ -530,5 +530,16 @@ if _HAS_FASTAPI:
             loaded = []
         return {"available": True, "models": models, "loaded": loaded}
 
+    # ── Buffer tools ──────────────────────────────────────────────────────
+    @app.post("/api/tools/init_buffer")
+    async def api_init_buffer(total_posts: int = 70, hours_back: int = 168):
+        """Trigger init_buffer in-process (avoids Pyrogram session conflict)."""
+        try:
+            from ouroboros.tools.channel_buffer import _init_buffer
+            result = _init_buffer(total_posts=total_posts, hours_back=hours_back)
+            return {"ok": True, "result": result}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     # ── Utils ─────────────────────────────────────────────────────────────
     # (helpers defined at module level above)
