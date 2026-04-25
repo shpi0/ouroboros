@@ -829,6 +829,7 @@ async def _async_forward_posts(
     total_limit: int,
     only_relevant: bool,
     hours_back: int,
+    limit_per_donor: Optional[int] = None,  # legacy alias, ignored
     batch_size: int = 5,
     progress_file: Optional[str] = None,
 ) -> Dict[str, Any]:
