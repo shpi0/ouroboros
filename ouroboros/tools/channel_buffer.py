@@ -628,6 +628,21 @@ async def _warm_up_buffer_peer(app, target_chat_id: int, invite_link: str = BUFF
 
 # ── Pyrogram async core ────────────────────────────────────────────────────────
 
+def _write_init_progress(sent: int, total: int, last_post: str, started_at: str, status: str) -> None:
+    try:
+        data = {
+            "sent": sent,
+            "total": total,
+            "last_post": (last_post or "")[:120],
+            "started_at": started_at,
+            "status": status,
+        }
+        with open("/tmp/init_buffer_progress.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as exc:
+        log.warning(f"Failed to write init progress: {exc!r}")
+
+
 async def _async_forward_posts(
     donors: List[str],
     target_chat_id: int,
@@ -635,6 +650,7 @@ async def _async_forward_posts(
     total_limit: int,
     only_relevant: bool,
     hours_back: int,
+    progress_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     from pyrogram import Client
     from pyrogram.errors import FloodWait
@@ -647,11 +663,10 @@ async def _async_forward_posts(
     session_string = secrets["session_string"]
 
     cutoff = datetime.utcnow() - timedelta(hours=hours_back)
+    started_at = datetime.utcnow().isoformat()
 
     forwarded = []
     errors = []
-
-    _military_donors = {"warhistoryalconafter", "Vspomni_o_Voine_neraz", "zloy_zhurnalist"}
 
     async with Client(
         name="ouroboros_session",
@@ -663,7 +678,7 @@ async def _async_forward_posts(
         # Warm up peer cache via invite link
         target_chat_id = await _warm_up_buffer_peer(app, target_chat_id)
 
-        # Phase 1: collect all raw candidates from all donors (without LLM)
+        # Phase 1: collect all raw candidates from all donors (no LLM calls yet)
         # Each entry: (donor, gid, msgs, text, rep_msg_id)
         raw_candidates: List[tuple] = []
 
@@ -701,107 +716,59 @@ async def _async_forward_posts(
             except Exception as e:
                 errors.append({"donor": donor, "error": repr(e)})
 
-        # Phase 2: batch LLM classification in parallel (max 8 concurrent calls)
-        if only_relevant:
-            sem = asyncio.Semaphore(8)
+        # Sort: media posts first, then text-only
+        raw_candidates.sort(
+            key=lambda x: 0 if any(m.photo or m.video or m.document or m.animation for m in x[2]) else 1
+        )
 
-            async def classify_one(item):
-                donor, gid, msgs, text, rep_id = item
-                async with sem:
-                    ok = await _llm_classify_post(text, msg_id=rep_id)
-                return (donor, gid, msgs, text, ok)
+        # Pre-compute per-category slot allocations based on CONTENT_PLAN
+        allocations: Dict[str, int] = {
+            cat: round(total_limit * frac) for cat, frac in CONTENT_PLAN.items()
+        }
+        allocations["OTHER"] = max(0, total_limit - sum(allocations.values()))
 
-            classified = await asyncio.gather(*[classify_one(item) for item in raw_candidates])
-        else:
-            classified = [(donor, gid, msgs, text, True) for donor, gid, msgs, text, rep_id in raw_candidates]
-
-        # Phase 3: apply per-donor limit and assign category
+        content_plan_counts: Dict[str, int] = {cat: 0 for cat in allocations}
         per_donor_counts: Dict[str, int] = {}
-        categorized: List[tuple] = []  # (donor, gid, msgs, text, has_media, category)
 
-        # Get categories in parallel (only for classified-ok items)
-        ok_items = [(donor, gid, msgs, text) for donor, gid, msgs, text, ok in classified if ok]
-
-        # Apply per-donor limits first
-        filtered_items = []
-        for donor, gid, msgs, text in ok_items:
-            count = per_donor_counts.get(donor, 0)
-            if count >= limit_per_donor:
-                continue
-            per_donor_counts[donor] = count + 1
-            has_media = any(m.photo or m.video or m.document or m.animation for m in msgs)
-            filtered_items.append((donor, gid, msgs, text, has_media))
-
-        # Get categories in parallel
-        cat_sem = asyncio.Semaphore(6)
-        async def get_cat(item):
-            donor, gid, msgs, text, has_media = item
-            async with cat_sem:
-                cat = await _llm_get_post_category(text)
-            return (donor, gid, msgs, text, has_media, cat)
-
-        categorized = await asyncio.gather(*[get_cat(item) for item in filtered_items])
-
-        # Phase 4: select posts according to CONTENT_PLAN
-        # Group by category
-        by_category: Dict[str, list] = {cat: [] for cat in CONTENT_PLAN}
-        by_category["OTHER"] = []
-        for item in categorized:
-            cat = item[5]
-            if cat not in by_category:
-                cat = "OTHER"
-            by_category[cat].append(item)
-
-        # Sort each category: media first
-        for cat in by_category:
-            by_category[cat].sort(key=lambda x: 0 if x[4] else 1)
-
-        # Allocate slots per category based on total_limit and CONTENT_PLAN
-        allocations: Dict[str, int] = {}
-        for cat, fraction in CONTENT_PLAN.items():
-            allocated = min(round(total_limit * fraction), len(by_category.get(cat, [])))
-            allocations[cat] = allocated
-
-        # Fill remaining slots with BATTLE (most common)
-        allocated_total = sum(allocations.values())
-        extra = total_limit - allocated_total
-        if extra > 0:
-            battle_available = len(by_category.get("BATTLE", [])) - allocations.get("BATTLE", 0)
-            if battle_available > 0:
-                allocations["BATTLE"] = allocations.get("BATTLE", 0) + min(extra, battle_available)
-
-        # Build interleaved candidate list: spread categories evenly
-        category_queues = {cat: list(by_category.get(cat, []))[:allocations.get(cat, 0)]
-                          for cat in list(CONTENT_PLAN.keys()) + ["OTHER"]}
-
-        # Build interleaved order: insert non-BATTLE every N posts
-        candidates: List[tuple] = []
-        battle_q = category_queues.pop("BATTLE", [])
-        other_cats_items = []
-        for cat, items in category_queues.items():
-            other_cats_items.extend(items)
-
-        # Interleave: every 4 BATTLE posts, insert 1 non-BATTLE (if available)
-        other_idx = 0
-        for i, item in enumerate(battle_q):
-            candidates.append(item)
-            if (i + 1) % 4 == 0 and other_idx < len(other_cats_items):
-                candidates.append(other_cats_items[other_idx])
-                other_idx += 1
-        # Append any remaining non-BATTLE at the end
-        candidates.extend(other_cats_items[other_idx:])
-
-        # Phase 5: send as own messages in interleaved order
-        for donor, gid, msgs, text, _has_media, *_cat in candidates:
-            if total_limit and len(forwarded) >= total_limit:
+        # Phase 2: process candidates one by one — classify, categorize, send immediately
+        for donor, gid, msgs, text, rep_id in raw_candidates:
+            if len(forwarded) >= total_limit:
                 break
+
+            # Per-donor limit
+            if per_donor_counts.get(donor, 0) >= limit_per_donor:
+                continue
+
+            # STRICT_FILTER_DONORS: skip irrelevant posts from broad-topic channels without LLM
+            if donor in STRICT_FILTER_DONORS and not _is_strictly_relevant(text):
+                continue
+
+            # LLM relevance classification
+            if only_relevant:
+                ok = await _llm_classify_post(text, msg_id=rep_id)
+                if not ok:
+                    continue
+
+            # LLM category assignment
+            cat = await _llm_get_post_category(text)
+
+            # Enforce content plan quota
+            cat_quota = allocations.get(cat, 0)
+            if content_plan_counts.get(cat, 0) >= cat_quota:
+                # If category quota full, try to put it in OTHER if OTHER has space
+                other_quota = allocations.get("OTHER", 0)
+                if cat == "OTHER" or content_plan_counts.get("OTHER", 0) >= other_quota:
+                    continue  # both category and OTHER full — skip
+                cat = "OTHER"  # redirect to OTHER bucket
 
             message_ids = [m.id for m in msgs]
             rep_msg = msgs[0]
-
             try:
                 text = str(text) if text is not None else ""
-                sent_msgs = await _send_as_own_message(app, target_chat_id, msgs, text)
+                await _send_as_own_message(app, target_chat_id, msgs, text)
+
+                per_donor_counts[donor] = per_donor_counts.get(donor, 0) + 1
+                content_plan_counts[cat] = content_plan_counts.get(cat, 0) + 1
 
                 forwarded.append({
                     "donor": donor,
@@ -812,6 +779,10 @@ async def _async_forward_posts(
                     "count_in_group": len(msgs),
                 })
 
+                if progress_file:
+                    _write_init_progress(len(forwarded), total_limit, text[:120], started_at, "running")
+
+                log.info(f"[forward_posts] sent {len(forwarded)}/{total_limit} — {donor} cat={cat}")
                 await asyncio.sleep(1.5)
 
             except FloodWait as e:
@@ -1000,28 +971,35 @@ def _clear_buffer_channel(ctx: ToolContext, target_chat_id: int = BUFFER_CHANNEL
 
 
 def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168, target_chat_id: int = BUFFER_CHANNEL_ID) -> Dict[str, Any]:
-    """Launch buffer initialization in a daemon thread with its own event loop and return immediately."""
+    """Launch buffer initialization in a daemon thread. Progress: /tmp/init_buffer_progress.json"""
     import threading
 
     def _thread_main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        started_at = datetime.datetime.utcnow().isoformat()
+        _write_init_progress(0, total_posts, "", started_at, "running")
         try:
             loop.run_until_complete(_async_clear_buffer(target_chat_id))
             log.info("Buffer cleared, starting forward_posts...")
             # Warm up Ollama — loads model into VRAM, keeps it alive for 1h
             loop.run_until_complete(_warmup_ollama())
             log.info("[init_buffer] Ollama warmed up, starting collection...")
-            loop.run_until_complete(_async_forward_posts(
+            result = loop.run_until_complete(_async_forward_posts(
                 donors=DONOR_CHANNELS,
                 target_chat_id=target_chat_id,
                 limit_per_donor=max(30, total_posts // len(DONOR_CHANNELS) + 5),
                 total_limit=total_posts,
                 only_relevant=True,
                 hours_back=hours_back,
+                progress_file="/tmp/init_buffer_progress.json",
             ))
+            sent = result.get("forwarded_count", 0)
+            last_post = result["forwarded"][-1]["text_preview"] if result.get("forwarded") else ""
+            _write_init_progress(sent, total_posts, last_post, started_at, "done")
             log.info("init_buffer background thread completed successfully")
         except Exception as e:
+            _write_init_progress(0, total_posts, "", started_at, "error")
             log.error(f"init_buffer background thread error: {e!r}")
         finally:
             loop.close()
@@ -1030,8 +1008,26 @@ def _init_buffer(ctx: ToolContext, total_posts: int = 70, hours_back: int = 168,
     t.start()
     return {
         "status": "started",
-        "message": f"Buffer initialization started in background thread. Will fill ~{total_posts} posts from last {hours_back}h. Check the buffer channel in 5-10 minutes.",
+        "message": (
+            f"Buffer initialization started in background. "
+            f"Will fill ~{total_posts} posts from last {hours_back}h. "
+            "Posts appear gradually every ~10-30s. Track progress: /tmp/init_buffer_progress.json"
+        ),
     }
+
+
+def _check_buffer_progress(ctx: ToolContext) -> Dict[str, Any]:
+    """Check the current progress of buffer initialization."""
+    import os
+    progress_file = "/tmp/init_buffer_progress.json"
+    if not os.path.exists(progress_file):
+        return {"status": "not_started", "message": "No init_buffer running or no progress file found"}
+    try:
+        with open(progress_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read progress: {e!r}"}
 
 
 # ── Daily scheduler ───────────────────────────────────────────────────────────
@@ -1199,4 +1195,14 @@ def get_tools() -> List[ToolEntry]:
                 "required": [],
             },
         }, _init_buffer),
+
+        ToolEntry("check_buffer_progress", {
+            "name": "check_buffer_progress",
+            "description": "Check the current progress of buffer initialization started by init_buffer. Returns sent count, total, last post, and status (running/done/error).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        }, _check_buffer_progress),
     ]
