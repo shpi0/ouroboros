@@ -119,8 +119,16 @@ if app:
 
     def _route_to_agent(text: str) -> None:
         try:
-            from supervisor.workers import handle_chat_direct
-            handle_chat_direct(WEB_CHAT_ID, text)
+            import uuid
+            from supervisor.queue import enqueue_task
+            task = {
+                "id": uuid.uuid4().hex[:8],
+                "type": "task",
+                "chat_id": WEB_CHAT_ID,
+                "text": text,
+                "_source": "web",
+            }
+            enqueue_task(task)
         except Exception as e:
             log.warning("Failed to route web message to agent: %s", e)
             try:
