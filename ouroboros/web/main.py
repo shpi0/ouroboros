@@ -6,136 +6,212 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
+    _HAS_FASTAPI = True
 except ImportError:
-    FastAPI = None
+    _HAS_FASTAPI = False
+
+from ouroboros.web.db import (
+    init_db, list_chats, create_chat, delete_chat, rename_chat,
+    add_message, get_messages, get_messages_since,
+)
 
 log = logging.getLogger(__name__)
 
-WEB_CHAT_ID = -999999
-
-_WEB_OUTBOX: Optional[asyncio.Queue] = None
-_ws_clients: List[WebSocket] = []
-
-DRIVE_ROOT = Path(os.environ.get("OUROBOROS_STATE_DIR", "/home/ouroboros/state"))
-STATE_FILE = DRIVE_ROOT / "state" / "state.json"
-EVENTS_FILE = DRIVE_ROOT / "logs" / "events.jsonl"
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+STATE_ROOT = Path(os.environ.get("DRIVE_ROOT", "/home/ouroboros/state"))
+STATE_FILE = STATE_ROOT / "state" / "state.json"
+EVENTS_FILE = STATE_ROOT / "logs" / "events.jsonl"
+WEB_INBOX  = STATE_ROOT / "web_inbox.jsonl"
+WEB_OUTBOX = STATE_ROOT / "web_outbox.jsonl"
 STATIC_DIR = Path(__file__).parent / "static"
 
-if FastAPI:
+# Numeric chat_id used in the task queue for "main" web chat (shared with Telegram owner)
+WEB_MAIN_CHAT_ID = -999999
+
+# ---------------------------------------------------------------------------
+# WebSocket client registry: chat_id → set of connected sockets
+# ---------------------------------------------------------------------------
+_ws_clients: Dict[str, Set[WebSocket]] = {}
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+if _HAS_FASTAPI:
     app = FastAPI(title="Ouroboros", docs_url=None, redoc_url=None)
+
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-else:
-    app = None
 
+    @app.on_event("startup")
+    async def _startup():
+        init_db()
+        asyncio.create_task(_poll_outbox_forever())
 
-def get_outbox() -> asyncio.Queue:
-    global _WEB_OUTBOX
-    if _WEB_OUTBOX is None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _WEB_OUTBOX = asyncio.Queue(maxsize=500)
-    return _WEB_OUTBOX
-
-
-def push_to_web(text: str, is_progress: bool = False) -> None:
-    """Called from sync context to push agent response to web clients."""
-    msg = {"ts": time.time(), "text": text, "is_progress": is_progress}
-    try:
-        get_outbox().put_nowait(msg)
-    except Exception:
-        pass
-
-
-if app:
+    # ── Static pages ──────────────────────────────────────────────────────
     @app.get("/")
-    async def chat_page():
+    async def _index():
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/stats")
-    async def stats_page():
+    async def _stats_page():
         return FileResponse(STATIC_DIR / "stats.html")
 
     @app.get("/settings")
-    async def settings_page():
+    async def _settings_page():
         return FileResponse(STATIC_DIR / "settings.html")
 
-    @app.websocket("/ws/chat")
-    async def websocket_chat(websocket: WebSocket):
+    @app.get("/health")
+    async def _health():
+        return {"ok": True}
+
+    # ── Chat REST API ──────────────────────────────────────────────────────
+    @app.get("/api/chats")
+    async def api_list_chats():
+        return list_chats()
+
+    class CreateChatBody(BaseModel):
+        title: str = "Новый чат"
+
+    @app.post("/api/chats")
+    async def api_create_chat(body: CreateChatBody):
+        return create_chat(body.title)
+
+    @app.delete("/api/chats/{chat_id}")
+    async def api_delete_chat(chat_id: str):
+        if not delete_chat(chat_id):
+            raise HTTPException(400, "Cannot delete main chat")
+        return {"ok": True}
+
+    class RenameChatBody(BaseModel):
+        title: str
+
+    @app.patch("/api/chats/{chat_id}")
+    async def api_rename_chat(chat_id: str, body: RenameChatBody):
+        rename_chat(chat_id, body.title)
+        return {"ok": True}
+
+    @app.get("/api/chats/{chat_id}/messages")
+    async def api_get_messages(chat_id: str, limit: int = 200, offset: int = 0):
+        return get_messages(chat_id, limit=limit, offset=offset)
+
+    # ── WebSocket ──────────────────────────────────────────────────────────
+    @app.websocket("/ws/chat/{chat_id}")
+    async def ws_chat(websocket: WebSocket, chat_id: str):
         await websocket.accept()
-        _ws_clients.append(websocket)
-        outbox = get_outbox()
-
-        async def forward_outbox():
-            while True:
-                try:
-                    msg = await asyncio.wait_for(outbox.get(), timeout=0.5)
-                    dead = []
-                    for ws in list(_ws_clients):
-                        try:
-                            await ws.send_json({"role": "assistant", **msg})
-                        except Exception:
-                            dead.append(ws)
-                    for ws in dead:
-                        if ws in _ws_clients:
-                            _ws_clients.remove(ws)
-                except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    await asyncio.sleep(0.1)
-
-        fwd = asyncio.create_task(forward_outbox())
+        _ws_clients.setdefault(chat_id, set()).add(websocket)
         try:
             while True:
                 raw = await websocket.receive_text()
-                payload = json.loads(raw)
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
                 text = str(payload.get("text", "")).strip()
                 if not text:
                     continue
-                for ws in list(_ws_clients):
-                    try:
-                        await ws.send_json({"role": "user", "text": text, "ts": time.time()})
-                    except Exception:
-                        pass
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, _route_to_agent, text)
+                # Save user message
+                msg = add_message(chat_id, "user", text)
+                # Broadcast to all clients on this chat (optimistic echo)
+                await _broadcast(chat_id, {"type": "message", **msg})
+                # Route to agent (non-blocking)
+                asyncio.get_event_loop().run_in_executor(
+                    None, _enqueue_for_agent, chat_id, text
+                )
         except WebSocketDisconnect:
             pass
         finally:
-            fwd.cancel()
-            if websocket in _ws_clients:
-                _ws_clients.remove(websocket)
+            _ws_clients.get(chat_id, set()).discard(websocket)
 
-    def _route_to_agent(text: str) -> None:
+    async def _broadcast(chat_id: str, data: dict):
+        dead = []
+        for ws in list(_ws_clients.get(chat_id, set())):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            _ws_clients.get(chat_id, set()).discard(ws)
+
+    async def _poll_outbox_forever():
+        """Read web_outbox.jsonl, push new messages to WebSocket clients and DB."""
+        processed_ids: Set[str] = set()
+        last_size: int = 0
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                if not WEB_OUTBOX.exists():
+                    continue
+                size = WEB_OUTBOX.stat().st_size
+                if size == last_size:
+                    continue
+                last_size = size
+                for line in WEB_OUTBOX.read_text(encoding="utf-8").splitlines():
+                    try:
+                        msg = json.loads(line)
+                    except Exception:
+                        continue
+                    mid = msg.get("id")
+                    if not mid or mid in processed_ids:
+                        continue
+                    processed_ids.add(mid)
+                    cid   = str(msg.get("web_chat_id") or msg.get("chat_id") or "main")
+                    role  = str(msg.get("role", "assistant"))
+                    text  = str(msg.get("text", ""))
+                    is_p  = bool(msg.get("is_progress", False))
+                    ts    = float(msg.get("ts", time.time()))
+                    # Persist to DB
+                    add_message(cid, role, text, is_progress=is_p, msg_id=mid, ts=ts)
+                    # Push to connected clients
+                    await _broadcast(cid, {
+                        "type": "message",
+                        "id": mid, "chat_id": cid, "role": role,
+                        "text": text, "ts": ts, "is_progress": is_p,
+                    })
+                # Keep set bounded
+                if len(processed_ids) > 20000:
+                    processed_ids = set(list(processed_ids)[-10000:])
+            except Exception as exc:
+                log.debug("Outbox poll error: %s", exc)
+
+    def _enqueue_for_agent(chat_id: str, text: str) -> None:
+        """Write user message to web_inbox.jsonl for the main agent."""
         try:
-            import uuid
-            from supervisor.queue import enqueue_task
-            task = {
-                "id": uuid.uuid4().hex[:8],
+            WEB_INBOX.parent.mkdir(parents=True, exist_ok=True)
+            # For "main" chat — use owner's numeric chat_id so agent treats it
+            # identically to Telegram messages. For isolated chats — use a
+            # synthetic negative ID derived from chat_id string.
+            if chat_id == "main":
+                numeric_id = WEB_MAIN_CHAT_ID
+            else:
+                # deterministic negative int per chat
+                numeric_id = -(abs(hash(chat_id)) % 900000 + 100000)
+            entry = {
+                "id": uuid.uuid4().hex[:12],
                 "type": "task",
-                "chat_id": WEB_CHAT_ID,
+                "chat_id": numeric_id,
+                "web_chat_id": chat_id,
                 "text": text,
                 "_source": "web",
+                "ts": time.time(),
             }
-            enqueue_task(task)
-        except Exception as e:
-            log.warning("Failed to route web message to agent: %s", e)
-            try:
-                push_to_web(f"\u26a0\ufe0f Agent error: {e}")
-            except Exception:
-                pass
+            with open(WEB_INBOX, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            log.warning("Failed to write web_inbox: %s", exc)
 
+    # ── Stats API ──────────────────────────────────────────────────────────
     @app.get("/api/stats")
     async def api_stats():
         state = _read_json(STATE_FILE) or {}
@@ -153,8 +229,9 @@ if app:
         top_tools = sorted(tool_counts.items(), key=lambda x: x[1], reverse=True)[:15]
         timeline = sorted(costs_by_hour.items())[-48:]
         spent = float(state.get("spent_usd", 0))
-        total_budget = float(state.get("budget_limit") or 50)
-        session_snap = float(state.get("session_total_snapshot", spent))
+        total_budget = float(state.get("budget_limit") or
+                             float(os.environ.get("TOTAL_BUDGET", "120") or 120))
+        session_snap = float(state.get("session_total_snapshot") or spent)
         return {
             "state": {
                 "spent_usd": spent,
@@ -173,23 +250,17 @@ if app:
             "cost_timeline": [{"hour": k, "cost": round(v, 6)} for k, v in timeline],
         }
 
-    @app.get("/api/state")
-    async def api_state():
-        state = _read_json(STATE_FILE) or {}
-        return {
-            "spent_usd": state.get("spent_usd", 0),
-            "budget_limit": float(state.get("budget_limit") or 50),
-            "version": state.get("version", "?"),
-            "branch": state.get("current_branch", "?"),
-            "session_id": state.get("session_id", "?"),
-        }
-
+    # ── Settings API ───────────────────────────────────────────────────────
     @app.get("/api/settings")
     async def api_settings_get():
         state = _read_json(STATE_FILE) or {}
+        spent = float(state.get("spent_usd", 0))
+        total = float(state.get("budget_limit") or
+                      float(os.environ.get("TOTAL_BUDGET", "120") or 120))
         return {
-            "spent_usd": float(state.get("spent_usd", 0)),
-            "total_usd": float(state.get("budget_limit") or 50),
+            "spent_usd": spent,
+            "total_usd": total,
+            "remaining_usd": max(0.0, total - spent),
             "version": state.get("version", "?"),
             "branch": state.get("current_branch", "?"),
             "session_id": state.get("session_id", "?"),
@@ -207,68 +278,17 @@ if app:
         _write_json(STATE_FILE, state)
         return {"ok": True, "total_usd": body.total_usd}
 
-    class BudgetUpdate(BaseModel):
-        budget_limit: float
-
-    @app.post("/api/settings/budget")
-    async def update_budget(body: BudgetUpdate):
-        if not (0 < body.budget_limit <= 1000):
-            raise HTTPException(400, "Budget must be between 1 and 1000")
-        state = _read_json(STATE_FILE) or {}
-        state["budget_limit"] = body.budget_limit
-        _write_json(STATE_FILE, state)
-        return {"ok": True, "budget_limit": body.budget_limit}
-
-    @app.post("/api/restart")
-    async def trigger_restart():
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(None, _route_to_agent, "/restart")
-            return {"ok": True, "message": "Restart triggered"}
-        except Exception as e:
-            raise HTTPException(500, str(e))
-
-    @app.get("/api/ollama/status")
-    async def api_ollama_status():
-        import urllib.request
-        import urllib.error
-
-        def _ollama_get(path: str):
-            with urllib.request.urlopen(f"http://127.0.0.1:11434{path}", timeout=3) as resp:
-                return json.loads(resp.read().decode())
-
-        loop = asyncio.get_event_loop()
-        try:
-            version_data = await loop.run_in_executor(None, _ollama_get, "/api/version")
-            version = version_data.get("version", "?")
-        except Exception as e:
-            return {"available": False, "version": None, "models": [], "loaded": [], "error": str(e)}
-
-        try:
-            tags_data = await loop.run_in_executor(None, _ollama_get, "/api/tags")
-            models = [m["name"] for m in (tags_data.get("models") or [])]
-        except Exception:
-            models = []
-
-        try:
-            ps_data = await loop.run_in_executor(None, _ollama_get, "/api/ps")
-            loaded = [m["name"] for m in (ps_data.get("models") or [])]
-        except Exception:
-            loaded = []
-
-        return {"available": True, "version": version, "models": models, "loaded": loaded, "error": None}
-
+    # ── Models API ─────────────────────────────────────────────────────────
     _MODEL_PRESETS = [
-        {"id": "anthropic/claude-opus-4-5", "name": "Claude Opus 4.5", "tier": "powerful"},
-        {"id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "tier": "balanced"},
-        {"id": "anthropic/claude-haiku-3-5", "name": "Claude Haiku 3.5", "tier": "fast"},
-        {"id": "openai/gpt-4o", "name": "GPT-4o", "tier": "balanced"},
-        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "tier": "fast"},
-        {"id": "google/gemini-2.5-pro-preview", "name": "Gemini 2.5 Pro", "tier": "powerful"},
-        {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash", "tier": "fast"},
-        {"id": "google/gemini-flash-1.5", "name": "Gemini Flash 1.5", "tier": "fast"},
-        {"id": "meta-llama/llama-4-maverick", "name": "Llama 4 Maverick", "tier": "balanced"},
-        {"id": "qwen/qwen3-235b-a22b", "name": "Qwen3 235B", "tier": "powerful"},
+        {"id": "anthropic/claude-opus-4-5",       "name": "Claude Opus 4.5",    "tier": "powerful"},
+        {"id": "anthropic/claude-sonnet-4-5",      "name": "Claude Sonnet 4.5",  "tier": "balanced"},
+        {"id": "anthropic/claude-haiku-3-5",       "name": "Claude Haiku 3.5",   "tier": "fast"},
+        {"id": "openai/gpt-4o",                    "name": "GPT-4o",             "tier": "balanced"},
+        {"id": "openai/gpt-4o-mini",               "name": "GPT-4o Mini",        "tier": "fast"},
+        {"id": "google/gemini-2.5-pro-preview",    "name": "Gemini 2.5 Pro",     "tier": "powerful"},
+        {"id": "google/gemini-2.0-flash-001",      "name": "Gemini 2.0 Flash",   "tier": "fast"},
+        {"id": "meta-llama/llama-4-maverick",      "name": "Llama 4 Maverick",   "tier": "balanced"},
+        {"id": "qwen/qwen3-235b-a22b",             "name": "Qwen3 235B",         "tier": "powerful"},
     ]
 
     @app.get("/api/models")
@@ -276,14 +296,14 @@ if app:
         state = _read_json(STATE_FILE) or {}
         return {
             "current": {
-                "main": os.environ.get("OUROBOROS_MODEL", ""),
+                "main":  os.environ.get("OUROBOROS_MODEL", ""),
                 "light": os.environ.get("OUROBOROS_MODEL_LIGHT", ""),
-                "code": os.environ.get("OUROBOROS_MODEL_CODE", ""),
+                "code":  os.environ.get("OUROBOROS_MODEL_CODE", ""),
             },
             "saved": {
-                "main": state.get("model_main"),
+                "main":  state.get("model_main"),
                 "light": state.get("model_light"),
-                "code": state.get("model_code"),
+                "code":  state.get("model_code"),
             },
             "presets": _MODEL_PRESETS,
         }
@@ -295,53 +315,72 @@ if app:
     @app.post("/api/models")
     async def api_models_post(body: ModelUpdate):
         if not body.model_id or "/" not in body.model_id:
-            raise HTTPException(400, "model_id must be non-empty and contain '/'")
+            raise HTTPException(400, "model_id must contain '/'")
         if body.role not in ("main", "light", "code"):
             raise HTTPException(400, "role must be main, light, or code")
-
         state = _read_json(STATE_FILE) or {}
         state[f"model_{body.role}"] = body.model_id
         _write_json(STATE_FILE, state)
-
-        env_key_map = {
-            "main": "OUROBOROS_MODEL",
+        env_map = {
+            "main":  "OUROBOROS_MODEL",
             "light": "OUROBOROS_MODEL_LIGHT",
-            "code": "OUROBOROS_MODEL_CODE",
+            "code":  "OUROBOROS_MODEL_CODE",
         }
-        env_key = env_key_map[body.role]
+        env_key = env_map[body.role]
         env_path = Path("/home/ouroboros/.env")
         try:
-            if env_path.exists():
-                lines = env_path.read_text().splitlines()
-                new_line = f"{env_key}={body.model_id}"
-                replaced = False
-                for i, line in enumerate(lines):
-                    if line.startswith(f"{env_key}=") or line.startswith(f"export {env_key}="):
-                        lines[i] = new_line
-                        replaced = True
-                        break
-                if not replaced:
-                    lines.append(new_line)
-                env_path.write_text("\n".join(lines) + "\n")
-            else:
-                env_path.write_text(f"{env_key}={body.model_id}\n")
+            lines = env_path.read_text().splitlines() if env_path.exists() else []
+            new_line = f"{env_key}={body.model_id}"
+            updated = False
+            for i, line in enumerate(lines):
+                if line.startswith(f"{env_key}="):
+                    lines[i] = new_line
+                    updated = True
+            if not updated:
+                lines.append(new_line)
+            env_path.write_text("\n".join(lines) + "\n")
         except Exception as exc:
             log.warning("Failed to update .env: %s", exc)
+        return {"ok": True, "note": "Restart required to apply model change"}
 
-        return {"ok": True, "note": "Restart required to apply"}
+    # ── Ollama status ──────────────────────────────────────────────────────
+    @app.get("/api/ollama/status")
+    async def api_ollama_status():
+        import urllib.request
+        def _get(path: str):
+            with urllib.request.urlopen(f"http://127.0.0.1:11434{path}", timeout=3) as r:
+                return json.loads(r.read())
+        loop = asyncio.get_event_loop()
+        try:
+            v = await loop.run_in_executor(None, _get, "/api/version")
+        except Exception as exc:
+            return {"available": False, "error": str(exc), "models": [], "loaded": []}
+        try:
+            tags = await loop.run_in_executor(None, _get, "/api/tags")
+            models = [m["name"] for m in (tags.get("models") or [])]
+        except Exception:
+            models = []
+        try:
+            ps = await loop.run_in_executor(None, _get, "/api/ps")
+            loaded = [m["name"] for m in (ps.get("models") or [])]
+        except Exception:
+            loaded = []
+        return {"available": True, "version": v.get("version"), "models": models, "loaded": loaded}
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _read_json(path: Path) -> Optional[Dict]:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
 def _write_json(path: Path, data: Dict) -> None:
-    import tempfile
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -357,3 +396,29 @@ def _read_jsonl_tail(path: Path, n: int) -> List[Dict]:
         return result
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Public helper for agent to write to web_outbox
+# ---------------------------------------------------------------------------
+def write_web_outbox(
+    web_chat_id: str,
+    text: str,
+    role: str = "assistant",
+    is_progress: bool = False,
+    msg_id: Optional[str] = None,
+) -> None:
+    """Called by the main agent process to push a message to web clients."""
+    try:
+        entry = {
+            "id": msg_id or uuid.uuid4().hex[:16],
+            "web_chat_id": web_chat_id,
+            "role": role,
+            "text": text,
+            "ts": time.time(),
+            "is_progress": is_progress,
+        }
+        with open(WEB_OUTBOX, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log.warning("write_web_outbox failed: %s", exc)
