@@ -689,7 +689,7 @@ async def _async_forward_posts(
         for donor in donors:
             try:
                 raw_messages = []
-                async for msg in app.get_chat_history(donor, limit=200):
+                async for msg in app.get_chat_history(donor, limit=50):
                     if msg.date and msg.date < cutoff:
                         break  # history is newest-first; once past cutoff, stop
                     if not (msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.animation):
@@ -720,6 +720,9 @@ async def _async_forward_posts(
             except Exception as e:
                 errors.append({"donor": donor, "error": repr(e)})
 
+            if progress_file:
+                _write_init_progress(0, total_limit, f"Collecting from {donor}...", started_at, "running")
+
         # Sort: media posts first, then text-only
         raw_candidates.sort(
             key=lambda x: 0 if any(m.photo or m.video or m.document or m.animation for m in x[2]) else 1
@@ -733,6 +736,9 @@ async def _async_forward_posts(
 
         content_plan_counts: Dict[str, int] = {cat: 0 for cat in allocations}
         per_donor_counts: Dict[str, int] = {}
+
+        if progress_file:
+            _write_init_progress(0, total_limit, f"Classifying {len(raw_candidates)} candidates...", started_at, "running")
 
         # Phase 2: process candidates one by one — classify, categorize, send immediately
         for donor, gid, msgs, text, rep_id in raw_candidates:
