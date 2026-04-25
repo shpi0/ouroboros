@@ -533,13 +533,35 @@ if _HAS_FASTAPI:
     # ── Buffer tools ──────────────────────────────────────────────────────
     @app.post("/api/tools/init_buffer")
     async def api_init_buffer(total_posts: int = 70, hours_back: int = 168):
-        """Trigger init_buffer in-process (avoids Pyrogram session conflict)."""
-        try:
-            from ouroboros.tools.channel_buffer import _init_buffer
-            result = _init_buffer(total_posts=total_posts, hours_back=hours_back)
-            return {"ok": True, "result": result}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        from ouroboros.tools.channel_buffer import _async_clear_buffer, _async_forward_posts, _warmup_ollama, _write_init_progress, DONOR_CHANNELS, BUFFER_CHANNEL_ID
+        import datetime
+
+        async def _bg_fill():
+            started_at = datetime.datetime.utcnow().isoformat()
+            _write_init_progress(0, total_posts, "", started_at, "running")
+            try:
+                await _async_clear_buffer(BUFFER_CHANNEL_ID)
+                await _warmup_ollama()
+                result = await _async_forward_posts(
+                    donors=DONOR_CHANNELS,
+                    target_chat_id=BUFFER_CHANNEL_ID,
+                    limit_per_donor=max(30, total_posts // len(DONOR_CHANNELS) + 5),
+                    total_limit=total_posts,
+                    only_relevant=True,
+                    hours_back=hours_back,
+                    progress_file="/tmp/init_buffer_progress.json",
+                )
+                sent = result.get("forwarded_count", 0)
+                last_post = result["forwarded"][-1]["text_preview"] if result.get("forwarded") else ""
+                _write_init_progress(sent, total_posts, last_post, started_at, "done")
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"api_init_buffer bg task error: {e!r}")
+                import datetime as _dt
+                _write_init_progress(0, total_posts, "", started_at, "error")
+
+        asyncio.create_task(_bg_fill())
+        return {"ok": True, "status": "started", "message": f"Buffer fill started: {total_posts} posts from last {hours_back}h"}
 
     # ── Utils ─────────────────────────────────────────────────────────────
     # (helpers defined at module level above)
