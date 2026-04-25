@@ -220,6 +220,108 @@ if app:
         except Exception as e:
             raise HTTPException(500, str(e))
 
+    @app.get("/api/ollama/status")
+    async def api_ollama_status():
+        import urllib.request
+        import urllib.error
+
+        def _ollama_get(path: str):
+            with urllib.request.urlopen(f"http://127.0.0.1:11434{path}", timeout=3) as resp:
+                return json.loads(resp.read().decode())
+
+        loop = asyncio.get_event_loop()
+        try:
+            version_data = await loop.run_in_executor(None, _ollama_get, "/api/version")
+            version = version_data.get("version", "?")
+        except Exception as e:
+            return {"available": False, "version": None, "models": [], "loaded": [], "error": str(e)}
+
+        try:
+            tags_data = await loop.run_in_executor(None, _ollama_get, "/api/tags")
+            models = [m["name"] for m in (tags_data.get("models") or [])]
+        except Exception:
+            models = []
+
+        try:
+            ps_data = await loop.run_in_executor(None, _ollama_get, "/api/ps")
+            loaded = [m["name"] for m in (ps_data.get("models") or [])]
+        except Exception:
+            loaded = []
+
+        return {"available": True, "version": version, "models": models, "loaded": loaded, "error": None}
+
+    _MODEL_PRESETS = [
+        {"id": "anthropic/claude-opus-4-5", "name": "Claude Opus 4.5", "tier": "powerful"},
+        {"id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "tier": "balanced"},
+        {"id": "anthropic/claude-haiku-3-5", "name": "Claude Haiku 3.5", "tier": "fast"},
+        {"id": "openai/gpt-4o", "name": "GPT-4o", "tier": "balanced"},
+        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "tier": "fast"},
+        {"id": "google/gemini-2.5-pro-preview", "name": "Gemini 2.5 Pro", "tier": "powerful"},
+        {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash", "tier": "fast"},
+        {"id": "google/gemini-flash-1.5", "name": "Gemini Flash 1.5", "tier": "fast"},
+        {"id": "meta-llama/llama-4-maverick", "name": "Llama 4 Maverick", "tier": "balanced"},
+        {"id": "qwen/qwen3-235b-a22b", "name": "Qwen3 235B", "tier": "powerful"},
+    ]
+
+    @app.get("/api/models")
+    async def api_models_get():
+        state = _read_json(STATE_FILE) or {}
+        return {
+            "current": {
+                "main": os.environ.get("OUROBOROS_MODEL", ""),
+                "light": os.environ.get("OUROBOROS_MODEL_LIGHT", ""),
+                "code": os.environ.get("OUROBOROS_MODEL_CODE", ""),
+            },
+            "saved": {
+                "main": state.get("model_main"),
+                "light": state.get("model_light"),
+                "code": state.get("model_code"),
+            },
+            "presets": _MODEL_PRESETS,
+        }
+
+    class ModelUpdate(BaseModel):
+        role: str
+        model_id: str
+
+    @app.post("/api/models")
+    async def api_models_post(body: ModelUpdate):
+        if not body.model_id or "/" not in body.model_id:
+            raise HTTPException(400, "model_id must be non-empty and contain '/'")
+        if body.role not in ("main", "light", "code"):
+            raise HTTPException(400, "role must be main, light, or code")
+
+        state = _read_json(STATE_FILE) or {}
+        state[f"model_{body.role}"] = body.model_id
+        _write_json(STATE_FILE, state)
+
+        env_key_map = {
+            "main": "OUROBOROS_MODEL",
+            "light": "OUROBOROS_MODEL_LIGHT",
+            "code": "OUROBOROS_MODEL_CODE",
+        }
+        env_key = env_key_map[body.role]
+        env_path = Path("/home/ouroboros/.env")
+        try:
+            if env_path.exists():
+                lines = env_path.read_text().splitlines()
+                new_line = f"{env_key}={body.model_id}"
+                replaced = False
+                for i, line in enumerate(lines):
+                    if line.startswith(f"{env_key}=") or line.startswith(f"export {env_key}="):
+                        lines[i] = new_line
+                        replaced = True
+                        break
+                if not replaced:
+                    lines.append(new_line)
+                env_path.write_text("\n".join(lines) + "\n")
+            else:
+                env_path.write_text(f"{env_key}={body.model_id}\n")
+        except Exception as exc:
+            log.warning("Failed to update .env: %s", exc)
+
+        return {"ok": True, "note": "Restart required to apply"}
+
 
 def _read_json(path: Path) -> Optional[Dict]:
     try:

@@ -49,6 +49,21 @@
   .danger-zone { border-color: rgba(224,90,90,0.35); }
   .danger-zone h2 { color: var(--danger); }
   .danger-note { font-size: 12px; color: var(--text3); margin-top: 10px; }
+
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot-green { background: var(--success); }
+  .dot-red { background: var(--danger); }
+  .model-badge { display: inline-block; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12px; font-family: monospace; color: var(--text); margin: 2px; }
+  .model-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .model-row .row-label { font-size: 12px; color: var(--text2); min-width: 70px; }
+  .model-row select {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 13px; padding: 7px 11px; flex: 1; min-width: 180px;
+    outline: none; cursor: pointer; transition: border-color 0.2s;
+  }
+  .model-row select:focus { border-color: var(--accent); }
+  .model-row .toast { width: 100%; margin-top: 4px; }
+  .warn-note { font-size: 12px; color: var(--text3); margin-top: 16px; }
 </style>
 </head>
 <body>
@@ -66,6 +81,54 @@
     <div class="field"><label>Версия</label><div class="val" id="val-version">…</div></div>
     <div class="field"><label>Ветка</label><div class="val" id="val-branch">…</div></div>
     <div class="field"><label>Session ID</label><div class="val" id="val-session" style="font-family:monospace;font-size:12px;">…</div></div>
+  </div>
+
+  <!-- Ollama -->
+  <div class="section">
+    <h2>Локальная LLM (Ollama)</h2>
+    <div class="field">
+      <label>Статус</label>
+      <div class="val" id="ollama-status">…</div>
+    </div>
+    <div class="field">
+      <label>Версия</label>
+      <div class="val" id="ollama-version">…</div>
+    </div>
+    <div class="field">
+      <label>Загруженные модели:</label>
+      <div id="ollama-loaded">…</div>
+    </div>
+    <div class="field">
+      <label>Доступные модели:</label>
+      <div id="ollama-models">…</div>
+    </div>
+  </div>
+
+  <!-- Models -->
+  <div class="section">
+    <h2>Модели OpenRouter</h2>
+    <div class="model-row">
+      <span class="row-label">Основная</span>
+      <span class="model-badge" id="model-current-main">…</span>
+      <select id="model-select-main"></select>
+      <button class="btn btn-primary" onclick="saveModel('main')">Сохранить</button>
+      <div class="toast" id="model-toast-main"></div>
+    </div>
+    <div class="model-row">
+      <span class="row-label">Лёгкая</span>
+      <span class="model-badge" id="model-current-light">…</span>
+      <select id="model-select-light"></select>
+      <button class="btn btn-primary" onclick="saveModel('light')">Сохранить</button>
+      <div class="toast" id="model-toast-light"></div>
+    </div>
+    <div class="model-row">
+      <span class="row-label">Код</span>
+      <span class="model-badge" id="model-current-code">…</span>
+      <select id="model-select-code"></select>
+      <button class="btn btn-primary" onclick="saveModel('code')">Сохранить</button>
+      <div class="toast" id="model-toast-code"></div>
+    </div>
+    <div class="warn-note">⚠️ Изменения применяются после рестарта агента</div>
   </div>
 
   <!-- Budget -->
@@ -148,7 +211,82 @@ document.getElementById('restart-btn').addEventListener('click', async () => {
   setTimeout(() => { btn.disabled = false; }, 3000);
 });
 
+async function loadOllamaStatus() {
+  try {
+    const r = await fetch('/api/ollama/status');
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    if (d.available) {
+      document.getElementById('ollama-status').innerHTML = '<span class="dot dot-green"></span>Доступна';
+      document.getElementById('ollama-version').textContent = 'Ollama v' + (d.version || '?');
+    } else {
+      document.getElementById('ollama-status').innerHTML = '<span class="dot dot-red"></span>Недоступна';
+      document.getElementById('ollama-version').textContent = d.error ? String(d.error).split('\n')[0] : '—';
+    }
+    document.getElementById('ollama-loaded').innerHTML = d.loaded && d.loaded.length
+      ? d.loaded.map(m => `<span class="model-badge">${m}</span>`).join(' ')
+      : '<span style="color:var(--text3)">нет</span>';
+    document.getElementById('ollama-models').innerHTML = d.models && d.models.length
+      ? d.models.map(m => `<span class="model-badge">${m}</span>`).join(' ')
+      : '<span style="color:var(--text3)">нет</span>';
+  } catch(e) {
+    document.getElementById('ollama-status').innerHTML = '<span class="dot dot-red"></span>Ошибка';
+    document.getElementById('ollama-version').textContent = String(e);
+  }
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    for (const role of ['main', 'light', 'code']) {
+      const current = d.current[role] || '';
+      document.getElementById(`model-current-${role}`).textContent = current || '?';
+      const sel = document.getElementById(`model-select-${role}`);
+      const presetIds = d.presets.map(p => p.id);
+      sel.innerHTML = '';
+      if (current && !presetIds.includes(current)) {
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current;
+        sel.appendChild(opt);
+      }
+      for (const p of d.presets) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = `${p.name} (${p.tier})`;
+        sel.appendChild(opt);
+      }
+      sel.value = d.saved[role] || current;
+    }
+  } catch(e) {
+    console.error('loadModels error:', e);
+  }
+}
+
+async function saveModel(role) {
+  const sel = document.getElementById(`model-select-${role}`);
+  const model_id = sel.value;
+  try {
+    const r = await fetch('/api/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({role, model_id}),
+    });
+    const d = await r.json();
+    if (d.ok) showToast(`model-toast-${role}`, `Сохранено ✓ ${d.note || ''}`, false);
+    else showToast(`model-toast-${role}`, d.detail || d.error || 'Ошибка', true);
+    await loadModels();
+  } catch(e) {
+    showToast(`model-toast-${role}`, String(e), true);
+  }
+}
+
 loadSettings();
+loadOllamaStatus();
+loadModels();
+setInterval(loadOllamaStatus, 30000);
 </script>
 </body>
 </html>
