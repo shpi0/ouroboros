@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate mTLS certificates for ouroboros.iarovoivv.com
+# Generate mTLS certificates for ouroboros.iarovoivv.ru
 # Creates: CA, server cert, client cert + .p12 for browser import
 #
 # Usage: bash scripts/gen_mtls_certs.sh
@@ -7,8 +7,9 @@
 
 set -e
 
-DOMAIN="ouroboros.iarovoivv.com"
-CERT_DIR="$(cd "$(dirname "$0")/.." && pwd)/certs"
+DOMAIN_PRIMARY="ouroboros.iarovoivv.ru"
+DOMAIN_ALT="ouroboros.iarovoivv.com"
+CERT_DIR="/home/ouroboros/certs"
 mkdir -p "$CERT_DIR"
 
 echo "[1/6] Generating CA key and certificate (10 years)..."
@@ -26,11 +27,11 @@ echo "[3/6] Generating server CSR and signing with CA (2 years)..."
 openssl req -new \
   -key "$CERT_DIR/server.key" \
   -out "$CERT_DIR/server.csr" \
-  -subj "/C=RU/O=Ouroboros/CN=$DOMAIN"
+  -subj "/C=RU/O=Ouroboros/CN=$DOMAIN_PRIMARY"
 
 cat > "$CERT_DIR/server_ext.cnf" <<EOF
 [SAN]
-subjectAltName=DNS:$DOMAIN,DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:$DOMAIN_PRIMARY,DNS:$DOMAIN_ALT,DNS:localhost,IP:127.0.0.1
 EOF
 
 openssl x509 -req -days 730 \
