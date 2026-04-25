@@ -6,288 +6,465 @@
 <title>Ouroboros</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
+:root {
+  --bg:       #0f0f0f;
+  --sidebar:  #141414;
+  --panel:    #1a1a1a;
+  --border:   #2a2a2a;
+  --text:     #e8e8e8;
+  --muted:    #888;
+  --accent:   #4f8ef7;
+  --green:    #3cb371;
+  --red:      #e05252;
+  --yellow:   #e0b84a;
+  --radius:   8px;
+  --sidebar-w:240px;
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, -apple-system, sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100vh; display: flex; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; display: flex; height: 100vh; overflow: hidden; }
 
-/* ── Sidebar ── */
-#sidebar { width: 240px; min-width: 200px; background: #141414; display: flex; flex-direction: column; border-right: 1px solid #2a2a2a; flex-shrink: 0; }
-#sidebar-header { padding: 16px 14px 6px; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.8px; }
-#new-chat-btn { margin: 8px 10px; padding: 9px 12px; background: #1e1e1e; border: 1px solid #333; color: #ccc; border-radius: 7px; cursor: pointer; font-size: 14px; text-align: left; transition: background 0.15s; }
-#new-chat-btn:hover { background: #2a2a2a; border-color: #444; }
-#chat-list { flex: 1; overflow-y: auto; padding: 4px 6px; }
-.chat-item { padding: 9px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; border-radius: 6px; margin: 1px 0; position: relative; }
-.chat-item:hover { background: #1e1e1e; }
-.chat-item.active { background: #1e3a5f; }
-.chat-icon { font-size: 15px; margin-right: 8px; flex-shrink: 0; }
-.chat-title-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-badge { font-size: 10px; color: #4a9eff; background: #0d2a4a; padding: 1px 6px; border-radius: 10px; margin-left: 4px; flex-shrink: 0; }
-.delete-btn { display: none; color: #555; font-size: 18px; padding: 0 2px; line-height: 1; }
-.chat-item:hover .delete-btn { display: block; }
-.delete-btn:hover { color: #e53e3e; }
-#sidebar-footer { padding: 10px 10px; border-top: 1px solid #222; display: flex; gap: 12px; }
-#sidebar-footer a { color: #555; font-size: 13px; text-decoration: none; transition: color 0.1s; }
-#sidebar-footer a:hover { color: #aaa; }
+/* ── SIDEBAR ── */
+#sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  background: var(--sidebar); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+}
+.sb-logo {
+  padding: 16px 14px 12px;
+  font-size: 16px; font-weight: 700; color: #fff;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: .3px;
+}
+.sb-logo span { opacity: .5; font-size: 12px; font-weight: 400; margin-left: 6px; }
+.sb-section { padding: 10px 14px 4px; font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+.sb-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; cursor: pointer; border: none; background: none;
+  color: var(--text); font-size: 14px; text-align: left; width: 100%;
+  border-radius: 0; transition: background .15s;
+}
+.sb-btn:hover { background: #222; }
+.sb-btn.active { background: #1e3a5f; color: #7eb8ff; }
+.sb-btn.active-stats { background: #1a3a1a; color: #6fcf6f; }
+.sb-btn.active-settings { background: #2a1a3a; color: #b07ef7; }
+.sb-btn .icon { font-size: 15px; flex-shrink: 0; }
+.sb-btn .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-btn .tag { font-size: 10px; background: #333; padding: 1px 5px; border-radius: 3px; color: var(--muted); flex-shrink: 0; }
+#chat-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+#chat-list::-webkit-scrollbar { width: 4px; }
+#chat-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+.new-chat-btn {
+  margin: 6px 10px 2px;
+  padding: 7px 10px; background: #222; border: 1px solid var(--border);
+  color: var(--muted); font-size: 13px; border-radius: var(--radius);
+  cursor: pointer; text-align: left; display: flex; align-items: center; gap: 6px;
+  transition: all .15s;
+}
+.new-chat-btn:hover { background: #2a2a2a; color: var(--text); }
+.sb-divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.sb-nav { padding: 0 0 8px; }
 
-/* ── Main area ── */
-#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-#chat-header { padding: 14px 20px; border-bottom: 1px solid #1e1e1e; font-size: 15px; font-weight: 600; background: #111; color: #ddd; flex-shrink: 0; }
-#messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+/* ── MAIN ── */
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
-/* ── Messages ── */
-.msg { display: flex; flex-direction: column; max-width: 78%; }
-.msg.user { align-self: flex-end; align-items: flex-end; }
-.msg.assistant, .msg.progress { align-self: flex-start; align-items: flex-start; }
-.msg-bubble { padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.55; word-break: break-word; }
-.msg.user .msg-bubble { background: #1a4bb5; color: #fff; border-radius: 14px 14px 4px 14px; }
-.msg.assistant .msg-bubble { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px 14px 14px 14px; }
-.msg.progress .msg-bubble { background: transparent; border: none; color: #555; font-style: italic; font-size: 13px; padding: 4px 8px; }
-.msg-time { font-size: 11px; color: #444; margin-top: 3px; padding: 0 2px; }
-.msg.user .msg-time { text-align: right; color: #3a6aaf; }
-/* Markdown inside bubbles */
-.msg-bubble p { margin: 0 0 8px; }
-.msg-bubble p:last-child { margin-bottom: 0; }
-.msg-bubble ul, .msg-bubble ol { margin: 6px 0 6px 20px; }
-.msg-bubble li { margin: 2px 0; }
-.msg-bubble code { background: #252525; border: 1px solid #333; padding: 1px 5px; border-radius: 4px; font-size: 13px; font-family: 'Fira Code', monospace; }
-.msg-bubble pre { background: #151515; border: 1px solid #2a2a2a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
-.msg-bubble pre code { background: none; border: none; padding: 0; font-size: 13px; }
-.msg-bubble h1, .msg-bubble h2, .msg-bubble h3 { margin: 10px 0 6px; font-size: 15px; }
-.msg-bubble a { color: #4a9eff; }
-.msg-bubble blockquote { border-left: 3px solid #333; padding-left: 10px; color: #888; margin: 6px 0; }
-.msg-bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
-.msg-bubble th, .msg-bubble td { border: 1px solid #333; padding: 4px 8px; }
-.msg-bubble th { background: #1e1e1e; }
+/* ── CHAT ── */
+#chat-view { display: flex; flex-direction: column; height: 100%; }
+#messages {
+  flex: 1; overflow-y: auto; padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+#messages::-webkit-scrollbar { width: 6px; }
+#messages::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+.msg { max-width: 820px; padding: 10px 14px; border-radius: var(--radius); line-height: 1.6; }
+.msg.user   { background: #1e3a5f; align-self: flex-end; color: #d0e8ff; }
+.msg.assistant { background: var(--panel); align-self: flex-start; }
+.msg.progress  { background: #1a1a0a; border-left: 3px solid var(--yellow); align-self: flex-start; color: #ccc; font-size: 12px; }
+.msg .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.msg pre { background: #111; padding: 10px; border-radius: 4px; overflow-x: auto; margin: 6px 0; font-size: 12px; }
+.msg code { font-family: monospace; }
+.msg p { margin: 4px 0; }
+#input-row {
+  padding: 12px 16px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+#msg-input {
+  flex: 1; background: var(--panel); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius); padding: 10px 12px;
+  font-size: 14px; resize: none; height: 44px; max-height: 140px;
+  outline: none; transition: border-color .15s; font-family: inherit; line-height: 1.4;
+}
+#msg-input:focus { border-color: var(--accent); }
+#send-btn {
+  height: 44px; padding: 0 18px; background: var(--accent); border: none;
+  color: #fff; border-radius: var(--radius); cursor: pointer; font-size: 14px;
+  flex-shrink: 0; transition: background .15s; white-space: nowrap;
+}
+#send-btn:hover { background: #3a7ce0; }
+#send-btn:disabled { background: #333; color: var(--muted); cursor: default; }
+.chat-title-bar {
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; background: var(--sidebar);
+}
+.chat-title-bar h2 { font-size: 15px; font-weight: 600; flex: 1; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; flex-shrink: 0; }
+.ws-dot.ok { background: var(--green); }
+.ws-dot.err { background: var(--red); }
 
-/* ── Input area ── */
-#input-area { padding: 12px 20px 16px; border-top: 1px solid #1e1e1e; background: #111; flex-shrink: 0; }
-#input-row { display: flex; align-items: flex-end; gap: 10px; }
-#msg-input { flex: 1; background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; border-radius: 10px; padding: 10px 14px; font-size: 15px; resize: none; line-height: 1.5; font-family: inherit; overflow-y: auto; min-height: 44px; max-height: 130px; transition: border-color 0.15s; }
-#msg-input:focus { outline: none; border-color: #1a4bb5; }
-#msg-input::placeholder { color: #444; }
-#send-btn { background: #1a4bb5; color: #fff; border: none; border-radius: 10px; padding: 0 20px; font-size: 15px; cursor: pointer; height: 44px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
-#send-btn:hover:not(:disabled) { background: #2255cc; }
-#send-btn:disabled { background: #222; color: #555; cursor: not-allowed; }
+/* ── STATS / SETTINGS ── */
+#stats-view, #settings-view {
+  flex: 1; overflow-y: auto; padding: 24px 28px;
+  display: none; flex-direction: column; gap: 20px;
+}
+#stats-view::-webkit-scrollbar, #settings-view::-webkit-scrollbar { width: 6px; }
+#stats-view::-webkit-scrollbar-thumb, #settings-view::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+.section-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+.section-sub   { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
 
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
+/* Cards */
+.cards { display: flex; gap: 12px; flex-wrap: wrap; }
+.card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 20px; min-width: 140px; flex: 1;
+}
+.card .val { font-size: 24px; font-weight: 700; color: var(--accent); }
+.card .val.green { color: var(--green); }
+.card .val.red   { color: var(--red); }
+.card .val.yellow{ color: var(--yellow); }
+.card .lbl { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+/* Progress bars */
+.bar-wrap { background: #222; border-radius: 4px; height: 8px; overflow: hidden; }
+.bar { height: 100%; border-radius: 4px; transition: width .5s; }
+.bar.cpu  { background: var(--accent); }
+.bar.mem  { background: var(--green); }
+.bar.disk { background: var(--yellow); }
+
+/* Tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+.tbl td { padding: 6px 10px; border-bottom: 1px solid #1e1e1e; }
+.tbl tr:hover td { background: #1e1e1e; }
+
+/* Provider table */
+.provider-tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+.tag-openrouter { background: #1e2e4a; color: #7eb8ff; }
+.tag-openai     { background: #1e3a1e; color: #6fcf6f; }
+.tag-ollama     { background: #2a1e3a; color: #b07ef7; }
+
+/* Ollama block */
+.ollama-block { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.ollama-block h3 { font-size: 14px; margin-bottom: 10px; }
+.model-chip { display: inline-flex; align-items: center; gap: 6px; background: #222; border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; font-size: 12px; margin: 3px; }
+.model-chip .vram { color: var(--yellow); font-size: 11px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.status-dot.ok  { background: var(--green); }
+.status-dot.err { background: var(--red); }
+
+/* Settings form */
+.settings-group { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+.settings-group h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; color: var(--text); }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field input, .field select {
+  width: 100%; background: #111; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 8px 10px; font-size: 13px; outline: none;
+  transition: border-color .15s;
+}
+.field input:focus, .field select:focus { border-color: var(--accent); }
+.field select option { background: #111; }
+.row-fields { display: flex; gap: 10px; align-items: flex-end; }
+.row-fields .field { flex: 1; margin-bottom: 0; }
+.save-btn {
+  padding: 8px 18px; background: var(--accent); border: none; color: #fff;
+  border-radius: 6px; cursor: pointer; font-size: 13px; transition: background .15s;
+  white-space: nowrap; flex-shrink: 0;
+}
+.save-btn:hover { background: #3a7ce0; }
+.saved-msg { color: var(--green); font-size: 12px; margin-top: 6px; display: none; }
+
+/* Timeline chart */
+.timeline-wrap { overflow-x: auto; }
+.timeline-bars { display: flex; align-items: flex-end; gap: 2px; height: 80px; min-width: 400px; }
+.tbar { flex: 1; min-width: 4px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .7; position: relative; cursor: default; }
+.tbar:hover { opacity: 1; }
+.tbar-tip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #333; color: #fff; font-size: 10px; padding: 2px 5px; border-radius: 3px; white-space: nowrap; display: none; pointer-events: none; }
+.tbar:hover .tbar-tip { display: block; }
+
+/* Refresh badge */
+.refresh-badge { font-size: 11px; color: var(--muted); margin-left: auto; }
+.section-header { display: flex; align-items: center; gap: 10px; }
 </style>
 </head>
 <body>
 
+<!-- ═══════════════════════════════ SIDEBAR ═══════════════════════════════ -->
 <div id="sidebar">
-  <div id="sidebar-header">Ouroboros</div>
-  <button id="new-chat-btn">+ Новый чат</button>
+  <div class="sb-logo">🤖 Ouroboros <span id="version-badge"></span></div>
+
+  <div class="sb-section">Чаты</div>
+  <button class="new-chat-btn" onclick="createChat()">＋ Новый чат</button>
   <div id="chat-list"></div>
-  <div id="sidebar-footer">
-    <a href="/stats">📊 Статистика</a>
-    <a href="/settings">⚙️ Настройки</a>
+
+  <hr class="sb-divider">
+  <div class="sb-section">Навигация</div>
+  <div class="sb-nav">
+    <button class="sb-btn" id="nav-stats" onclick="showSection('stats')">
+      <span class="icon">📊</span><span class="label">Статистика</span>
+    </button>
+    <button class="sb-btn" id="nav-settings" onclick="showSection('settings')">
+      <span class="icon">⚙️</span><span class="label">Настройки</span>
+    </button>
   </div>
 </div>
 
+<!-- ═══════════════════════════════ MAIN ════════════════════════════════ -->
 <div id="main">
-  <div id="chat-header">Загрузка...</div>
-  <div id="messages"></div>
-  <div id="input-area">
+
+  <!-- CHAT VIEW -->
+  <div id="chat-view">
+    <div class="chat-title-bar">
+      <div class="ws-dot" id="ws-dot"></div>
+      <h2 id="chat-name">Загрузка...</h2>
+    </div>
+    <div id="messages"></div>
     <div id="input-row">
-      <textarea id="msg-input" rows="1" placeholder="Написать сообщение... (Enter — отправить, Shift+Enter — новая строка)"></textarea>
-      <button id="send-btn" disabled>Отправить</button>
+      <textarea id="msg-input" placeholder="Сообщение..." rows="1"></textarea>
+      <button id="send-btn" onclick="sendMessage()">Отправить</button>
     </div>
   </div>
-</div>
+
+  <!-- STATS VIEW -->
+  <div id="stats-view">
+    <div class="section-header">
+      <div class="section-title">📊 Статистика</div>
+      <div class="refresh-badge" id="stats-updated"></div>
+    </div>
+
+    <div class="cards" id="budget-cards"></div>
+    <div class="cards" id="token-cards"></div>
+
+    <!-- System resources -->
+    <div class="section-title" style="font-size:15px;margin-top:4px">🖥️ Ресурсы VPS</div>
+    <div class="cards" id="sys-cards">
+      <div class="card"><div class="val" id="sys-cpu">—</div><div class="lbl">CPU %</div></div>
+      <div class="card"><div class="val" id="sys-mem">—</div><div class="lbl">RAM (использовано)</div></div>
+      <div class="card"><div class="val" id="sys-disk">—</div><div class="lbl">Диск (использовано)</div></div>
+      <div class="card"><div class="val" id="sys-uptime">—</div><div class="lbl">Uptime</div></div>
+      <div class="card"><div class="val" id="sys-load">—</div><div class="lbl">Load avg</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px" id="sys-bars">
+      <div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:3px"><span>CPU</span><span id="cpu-pct-lbl"></span></div><div class="bar-wrap"><div class="bar cpu" id="bar-cpu" style="width:0%"></div></div></div>
+      <div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:3px"><span>RAM</span><span id="mem-pct-lbl"></span></div><div class="bar-wrap"><div class="bar mem" id="bar-mem" style="width:0%"></div></div></div>
+      <div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:3px"><span>Диск</span><span id="disk-pct-lbl"></span></div><div class="bar-wrap"><div class="bar disk" id="bar-disk" style="width:0%"></div></div></div>
+    </div>
+
+    <!-- By provider -->
+    <div class="section-title" style="font-size:15px;margin-top:4px">🌐 По провайдеру</div>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+      <table class="tbl" id="provider-tbl">
+        <thead><tr><th>Провайдер</th><th>Вызовов</th><th>Токенов prompt</th><th>Completion</th><th>Cached</th><th>Стоимость</th></tr></thead>
+        <tbody id="provider-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Cost timeline -->
+    <div class="section-title" style="font-size:15px;margin-top:4px">📈 Расходы по времени</div>
+    <div class="timeline-wrap"><div class="timeline-bars" id="timeline-bars"></div></div>
+
+    <!-- Ollama -->
+    <div id="ollama-block" class="ollama-block">
+      <h3>🦙 Локальная LLM (Ollama)</h3>
+      <div id="ollama-status">Загрузка...</div>
+    </div>
+
+    <!-- Top tools -->
+    <div class="section-title" style="font-size:15px;margin-top:4px">🔧 Топ инструментов</div>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+      <table class="tbl">
+        <thead><tr><th>Инструмент</th><th>Вызовов</th></tr></thead>
+        <tbody id="tools-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- SETTINGS VIEW -->
+  <div id="settings-view">
+    <div class="section-title">⚙️ Настройки</div>
+    <div class="section-sub">Изменения бюджетов применяются немедленно в state.json и .env</div>
+
+    <!-- Budget -->
+    <div class="settings-group">
+      <h3>💰 Бюджеты</h3>
+      <div class="row-fields">
+        <div class="field"><label>Общий лимит (TOTAL_BUDGET, $)</label><input type="number" id="s-total" step="1" min="1" max="10000"></div>
+        <div class="field"><label>OpenAI / Whisper budget ($)</label><input type="number" id="s-openai" step="1" min="0"></div>
+        <div class="field"><label>Claude Code budget ($)</label><input type="number" id="s-claude" step="1" min="0"></div>
+        <button class="save-btn" onclick="saveBudgets()">Сохранить</button>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:var(--muted)">
+        Потрачено: <span id="s-spent" style="color:var(--text)">—</span> &nbsp;|&nbsp;
+        Остаток: <span id="s-remain" style="color:var(--green)">—</span>
+      </div>
+      <div class="saved-msg" id="budget-saved">✓ Сохранено</div>
+    </div>
+
+    <!-- Models -->
+    <div class="settings-group">
+      <h3>🧠 Модели</h3>
+      <div id="model-fields"></div>
+      <div class="saved-msg" id="model-saved">✓ Сохранено</div>
+    </div>
+
+    <!-- Ollama -->
+    <div class="settings-group" id="ollama-settings-block">
+      <h3>🦙 Ollama (локальная LLM)</h3>
+      <div id="ollama-settings-status">Загрузка...</div>
+    </div>
+
+    <!-- Info -->
+    <div class="settings-group">
+      <h3>ℹ️ Система</h3>
+      <div style="font-size:13px;display:flex;flex-direction:column;gap:6px">
+        <div>Версия: <strong id="s-version">—</strong></div>
+        <div>Ветка: <strong id="s-branch">—</strong></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
 
 <script>
-marked.setOptions({ breaks: true, gfm: true });
-
-// ── State ──────────────────────────────────────────────────────────────────
-let currentChatId = 'main';
+// ══════════════════════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════════════════════
+let currentChatId = null;
+let currentSection = 'chat';
 let ws = null;
 let chats = [];
+let statsTimer = null;
+let sysTimer = null;
 
-// ── Init ───────────────────────────────────────────────────────────────────
-async function init() {
-  await loadChats();
-  const saved = localStorage.getItem('currentChatId');
-  const target = (saved && chats.find(c => c.id === saved)) ? saved : 'main';
-  selectChat(target);
+// ══════════════════════════════════════════════════════════════════════
+// Section switching
+// ══════════════════════════════════════════════════════════════════════
+function showSection(section) {
+  currentSection = section;
+
+  document.getElementById('chat-view').style.display   = section === 'chat'     ? 'flex'   : 'none';
+  document.getElementById('stats-view').style.display  = section === 'stats'    ? 'flex'   : 'none';
+  document.getElementById('settings-view').style.display = section === 'settings' ? 'flex' : 'none';
+
+  // Sidebar active states
+  document.querySelectorAll('#chat-list .sb-btn').forEach(b => {
+    b.classList.remove('active');
+    if (b.dataset.chatId === currentChatId && section === 'chat') b.classList.add('active');
+  });
+  const ns = document.getElementById('nav-stats');
+  const ns2 = document.getElementById('nav-settings');
+  ns.className  = 'sb-btn' + (section === 'stats'    ? ' active-stats'    : '');
+  ns2.className = 'sb-btn' + (section === 'settings' ? ' active-settings' : '');
+
+  if (section === 'stats')    { loadStats(); loadSystem(); startAutoRefresh(); }
+  else                        { stopAutoRefresh(); }
+  if (section === 'settings') loadSettingsPage();
 }
 
-// ── Chat list ──────────────────────────────────────────────────────────────
+function startAutoRefresh() {
+  stopAutoRefresh();
+  statsTimer = setInterval(loadStats,  30000);
+  sysTimer   = setInterval(loadSystem, 5000);
+}
+function stopAutoRefresh() {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (sysTimer)   { clearInterval(sysTimer);   sysTimer   = null; }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Chat list
+// ══════════════════════════════════════════════════════════════════════
 async function loadChats() {
   const res = await fetch('/api/chats');
   chats = await res.json();
   renderChatList();
+  if (!currentChatId && chats.length > 0) selectChat(chats[0].id);
 }
 
 function renderChatList() {
-  const list = document.getElementById('chat-list');
-  list.innerHTML = '';
+  const el = document.getElementById('chat-list');
+  el.innerHTML = '';
   chats.forEach(c => {
-    const div = document.createElement('div');
-    div.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
-    div.dataset.id = c.id;
-
-    const icon = document.createElement('span');
-    icon.className = 'chat-icon';
-    icon.textContent = c.is_main ? '🔗' : '💬';
-
-    const title = document.createElement('span');
-    title.className = 'chat-title-text';
-    title.textContent = c.title;
-
-    div.appendChild(icon);
-    div.appendChild(title);
-
-    if (c.is_main) {
-      const badge = document.createElement('span');
-      badge.className = 'chat-badge';
-      badge.textContent = 'TG';
-      div.appendChild(badge);
-    } else {
-      const del = document.createElement('span');
-      del.className = 'delete-btn';
-      del.textContent = '×';
-      del.title = 'Удалить чат';
-      del.onclick = async (e) => {
-        e.stopPropagation();
-        if (!confirm('Удалить чат?')) return;
-        await fetch(`/api/chats/${c.id}`, { method: 'DELETE' });
-        if (currentChatId === c.id) selectChat('main');
-        await loadChats();
-      };
-      div.appendChild(del);
-    }
-
-    div.onclick = () => selectChat(c.id);
-    list.appendChild(div);
+    const btn = document.createElement('button');
+    btn.className = 'sb-btn' + (c.id === currentChatId && currentSection === 'chat' ? ' active' : '');
+    btn.dataset.chatId = c.id;
+    const icon = c.id === 'main' ? '🔗' : '💬';
+    const tag  = c.id === 'main' ? '<span class="tag">TG</span>' : '';
+    btn.innerHTML = `<span class="icon">${icon}</span><span class="label">${esc(c.title)}</span>${tag}`;
+    btn.onclick = () => { selectChat(c.id); showSection('chat'); };
+    el.appendChild(btn);
   });
 }
 
-// ── Select chat ────────────────────────────────────────────────────────────
+async function createChat() {
+  const title = prompt('Название чата:', 'Новый чат');
+  if (!title) return;
+  const res = await fetch('/api/chats', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({title}) });
+  const chat = await res.json();
+  chats.push(chat);
+  renderChatList();
+  selectChat(chat.id);
+  showSection('chat');
+}
+
 async function selectChat(chatId) {
   currentChatId = chatId;
-  localStorage.setItem('currentChatId', chatId);
-
-  // Update sidebar
-  document.querySelectorAll('.chat-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.id === chatId);
-  });
-
-  // Update header
   const chat = chats.find(c => c.id === chatId);
-  document.getElementById('chat-header').textContent = chat ? chat.title : chatId;
-
-  // Clear messages
+  document.getElementById('chat-name').textContent = chat ? chat.title : chatId;
+  renderChatList();
   document.getElementById('messages').innerHTML = '';
-
   // Load history
   const res = await fetch(`/api/chats/${chatId}/messages?limit=200`);
   const msgs = await res.json();
-  msgs.forEach(m => renderMessage(m, false));
+  msgs.forEach(m => appendMessage(m, false));
   scrollBottom();
-
-  // Connect WebSocket
   connectWS(chatId);
 }
 
-// ── WebSocket ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+// WebSocket
+// ══════════════════════════════════════════════════════════════════════
 function connectWS(chatId) {
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
-
+  if (ws) { ws.close(); ws = null; }
+  const dot = document.getElementById('ws-dot');
+  dot.className = 'ws-dot';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws/chat/${chatId}`);
-
-  ws.onopen = () => {
-    document.getElementById('send-btn').disabled = false;
+  ws.onopen  = () => { dot.className = 'ws-dot ok'; };
+  ws.onclose = () => { dot.className = 'ws-dot err'; setTimeout(() => { if (currentChatId === chatId) connectWS(chatId); }, 3000); };
+  ws.onerror = () => { dot.className = 'ws-dot err'; };
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'message') appendMessage(data, true);
   };
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'message') {
-        // Don't re-render user messages already shown optimistically
-        if (data.role === 'user' && data._optimistic) return;
-        renderMessage(data, true);
-        scrollBottom();
-      }
-    } catch (e) {}
-  };
-
-  ws.onclose = () => {
-    document.getElementById('send-btn').disabled = true;
-    // Reconnect after 2s
-    setTimeout(() => { if (currentChatId === chatId) connectWS(chatId); }, 2000);
-  };
-
-  ws.onerror = () => ws.close();
 }
 
-// ── Render message ─────────────────────────────────────────────────────────
-function renderMessage(msg, animate) {
-  const container = document.getElementById('messages');
+// ══════════════════════════════════════════════════════════════════════
+// Messages
+// ══════════════════════════════════════════════════════════════════════
+function appendMessage(msg, scroll) {
+  // Skip echo of own user messages that already shown optimistically
+  const existing = document.querySelector(`[data-id="${msg.id}"]`);
+  if (existing) return;
 
-  // Skip user messages that are already shown (optimistic render)
-  if (msg.role === 'user' && document.querySelector(`[data-id="${msg.id}"]`)) return;
+  const el = document.createElement('div');
+  el.dataset.id = msg.id || '';
+  el.className = 'msg ' + (msg.role === 'user' ? 'user' : msg.is_progress ? 'progress' : 'assistant');
 
-  // Collapse/replace previous progress messages when real assistant msg arrives
-  if (msg.role === 'assistant' && !msg.is_progress) {
-    document.querySelectorAll('.msg.progress').forEach(el => el.remove());
-  }
-
-  const div = document.createElement('div');
-  div.className = `msg ${msg.is_progress ? 'progress' : msg.role}`;
-  if (msg.id) div.dataset.id = msg.id;
-
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-
-  if (msg.role === 'user') {
-    bubble.textContent = msg.text;
-  } else {
-    bubble.innerHTML = marked.parse(msg.text || '');
-  }
-
-  const time = document.createElement('div');
-  time.className = 'msg-time';
-  const d = new Date(msg.ts * 1000);
-  time.textContent = d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
-
-  div.appendChild(bubble);
-  if (!msg.is_progress) div.appendChild(time);
-
-  if (animate) div.style.animation = 'none';
-  container.appendChild(div);
-}
-
-// ── Send ───────────────────────────────────────────────────────────────────
-function sendMessage() {
-  const input = document.getElementById('msg-input');
-  const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-  // Optimistic render
-  const tempId = 'opt-' + Date.now();
-  renderMessage({ id: tempId, role: 'user', text, ts: Date.now() / 1000, is_progress: false }, true);
-  scrollBottom();
-
-  ws.send(JSON.stringify({ text }));
-  input.value = '';
-  resizeInput(input);
-
-  // Show typing indicator
-  const thinking = document.createElement('div');
-  thinking.className = 'msg progress';
-  thinking.id = 'typing-indicator';
-  thinking.innerHTML = '<div class="msg-bubble">⏳ Думаю...</div>';
-  document.getElementById('messages').appendChild(thinking);
-  scrollBottom();
-}
-
-// ── Input helpers ──────────────────────────────────────────────────────────
-function resizeInput(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 130) + 'px';
+  let html = '';
+  try { html = marked.parse(msg.text || ''); } catch(e) { html = esc(msg.text || ''); }
+  const ts = msg.ts ? new Date(msg.ts * 1000).toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'}) : '';
+  el.innerHTML = html + `<div class="meta">${ts}</div>`;
+  document.getElementById('messages').appendChild(el);
+  if (scroll) scrollBottom();
 }
 
 function scrollBottom() {
@@ -295,36 +472,230 @@ function scrollBottom() {
   m.scrollTop = m.scrollHeight;
 }
 
-// ── New chat ───────────────────────────────────────────────────────────────
-document.getElementById('new-chat-btn').onclick = async () => {
-  const title = prompt('Название чата:', 'Новый чат');
-  if (!title) return;
-  const res = await fetch('/api/chats', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
+// ══════════════════════════════════════════════════════════════════════
+// Send
+// ══════════════════════════════════════════════════════════════════════
+function sendMessage() {
+  const inp = document.getElementById('msg-input');
+  const text = inp.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({text}));
+  inp.value = '';
+  inp.style.height = '44px';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('msg-input');
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
-  const chat = await res.json();
-  await loadChats();
-  selectChat(chat.id);
-};
+  inp.addEventListener('input', () => {
+    inp.style.height = '44px';
+    inp.style.height = Math.min(inp.scrollHeight, 140) + 'px';
+  });
+  loadChats();
+  showSection('chat');
+});
 
-// ── Event listeners ────────────────────────────────────────────────────────
-document.getElementById('send-btn').onclick = sendMessage;
+// ══════════════════════════════════════════════════════════════════════
+// Stats
+// ══════════════════════════════════════════════════════════════════════
+async function loadStats() {
+  try {
+    const [s, o] = await Promise.all([fetch('/api/stats').then(r=>r.json()), fetch('/api/ollama/status').then(r=>r.json())]);
+    const st = s.state;
 
-document.getElementById('msg-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
+    // Version badge
+    document.getElementById('version-badge').textContent = st.version || '';
+
+    // Budget cards
+    document.getElementById('budget-cards').innerHTML = `
+      <div class="card"><div class="val red">$${st.spent_usd.toFixed(2)}</div><div class="lbl">Потрачено всего</div></div>
+      <div class="card"><div class="val green">$${st.remaining_usd.toFixed(2)}</div><div class="lbl">Остаток из $${st.total_budget}</div></div>
+      <div class="card"><div class="val yellow">$${st.session_spent.toFixed(3)}</div><div class="lbl">Сессия</div></div>
+    `;
+
+    // Token cards
+    const totalTok = st.spent_tokens_prompt + st.spent_tokens_completion + st.spent_tokens_cached;
+    document.getElementById('token-cards').innerHTML = `
+      <div class="card"><div class="val">${fmtNum(st.spent_calls)}</div><div class="lbl">Вызовов LLM</div></div>
+      <div class="card"><div class="val">${fmtNum(totalTok)}</div><div class="lbl">Токенов всего</div></div>
+      <div class="card"><div class="val">${fmtNum(st.spent_tokens_prompt)}</div><div class="lbl">Prompt</div></div>
+      <div class="card"><div class="val">${fmtNum(st.spent_tokens_completion)}</div><div class="lbl">Completion</div></div>
+      <div class="card"><div class="val">${fmtNum(st.spent_tokens_cached)}</div><div class="lbl">Cached</div></div>
+    `;
+
+    // Provider table
+    const prov = s.by_provider || {};
+    const tbody = document.getElementById('provider-tbody');
+    tbody.innerHTML = '';
+    [['openrouter','OpenRouter'], ['openai','OpenAI / Whisper'], ['ollama','Ollama (локальная)']].forEach(([key, name]) => {
+      const p = prov[key] || {};
+      const tagCls = 'provider-tag tag-' + key;
+      const cost = key === 'ollama' ? 'бесплатно' : `$${(p.cost||0).toFixed(4)}`;
+      tbody.innerHTML += `<tr>
+        <td><span class="${tagCls}">${name}</span></td>
+        <td>${fmtNum(p.calls||0)}</td>
+        <td>${fmtNum(p.prompt||0)}</td>
+        <td>${fmtNum(p.completion||0)}</td>
+        <td>${fmtNum(p.cached||0)}</td>
+        <td>${cost}</td>
+      </tr>`;
+    });
+
+    // Timeline
+    const tl = s.cost_timeline || [];
+    if (tl.length > 0) {
+      const max = Math.max(...tl.map(t => t.cost), 0.001);
+      const bars = document.getElementById('timeline-bars');
+      bars.innerHTML = tl.map(t => {
+        const h = Math.max(4, Math.round(t.cost / max * 76));
+        const label = t.hour + ' $' + t.cost.toFixed(4);
+        return `<div class="tbar" style="height:${h}px" title="${label}"><span class="tbar-tip">${label}</span></div>`;
+      }).join('');
+    }
+
+    // Ollama
+    renderOllamaBlock(o, 'ollama-status');
+
+    // Tools
+    const tools = s.top_tools || [];
+    const maxCount = tools[0]?.count || 1;
+    document.getElementById('tools-tbody').innerHTML = tools.map(t =>
+      `<tr><td>${esc(t.name)}</td><td>${t.count}</td></tr>`
+    ).join('');
+
+    document.getElementById('stats-updated').textContent = 'Обновлено ' + new Date().toLocaleTimeString('ru');
+  } catch(e) { console.error('Stats error', e); }
+}
+
+function renderOllamaBlock(o, elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!o.available) {
+    el.innerHTML = `<span class="status-dot err"></span> Недоступна — ${esc(o.error || '')}`;
+    return;
   }
-});
+  let html = `<span class="status-dot ok"></span> Доступна`;
+  if (o.loaded && o.loaded.length > 0) {
+    html += '<div style="margin-top:8px;font-size:12px;color:var(--muted)">Загружено в память:</div>';
+    html += o.loaded.map(m =>
+      `<div class="model-chip">${esc(m.name)} <span class="vram">${m.vram_gb}GB VRAM · до ${fmtExpiry(m.expires)}</span></div>`
+    ).join('');
+  } else {
+    html += '<div style="margin-top:6px;font-size:12px;color:var(--muted)">Модели не загружены в память</div>';
+  }
+  if (o.models && o.models.length > 0) {
+    html += `<div style="margin-top:8px;font-size:12px;color:var(--muted)">Доступные модели: ${o.models.map(m=>`<span class="model-chip">${esc(m)}</span>`).join('')}</div>`;
+  }
+  el.innerHTML = html;
+}
 
-document.getElementById('msg-input').addEventListener('input', (e) => {
-  resizeInput(e.target);
-});
+function fmtExpiry(iso) {
+  if (!iso) return '?';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+  } catch(e) { return iso; }
+}
 
-// ── Start ──────────────────────────────────────────────────────────────────
-init();
+// ══════════════════════════════════════════════════════════════════════
+// System stats
+// ══════════════════════════════════════════════════════════════════════
+async function loadSystem() {
+  try {
+    const s = await fetch('/api/system').then(r => r.json());
+    document.getElementById('sys-cpu').textContent    = s.cpu_pct + '%';
+    document.getElementById('sys-cpu').className      = 'val ' + (s.cpu_pct > 80 ? 'red' : s.cpu_pct > 50 ? 'yellow' : '');
+    document.getElementById('sys-mem').textContent    = s.mem.used_mb + ' МБ';
+    document.getElementById('sys-disk').textContent   = s.disk.used_gb + ' ГБ';
+    document.getElementById('sys-uptime').textContent = s.uptime;
+    document.getElementById('sys-load').textContent   = s.load.join(' / ');
+
+    document.getElementById('cpu-pct-lbl').textContent  = s.cpu_pct + '%';
+    document.getElementById('mem-pct-lbl').textContent  = s.mem.used_mb + ' / ' + s.mem.total_mb + ' МБ (' + s.mem.pct + '%)';
+    document.getElementById('disk-pct-lbl').textContent = s.disk.used_gb + ' / ' + s.disk.total_gb + ' ГБ (' + s.disk.pct + '%)';
+
+    document.getElementById('bar-cpu').style.width  = s.cpu_pct + '%';
+    document.getElementById('bar-mem').style.width  = s.mem.pct + '%';
+    document.getElementById('bar-disk').style.width = s.disk.pct + '%';
+  } catch(e) { console.warn('System stats error', e); }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Settings
+// ══════════════════════════════════════════════════════════════════════
+async function loadSettingsPage() {
+  try {
+    const [cfg, models, ollama] = await Promise.all([
+      fetch('/api/settings').then(r=>r.json()),
+      fetch('/api/models').then(r=>r.json()),
+      fetch('/api/ollama/status').then(r=>r.json()),
+    ]);
+
+    document.getElementById('s-total').value  = cfg.total_usd  || '';
+    document.getElementById('s-openai').value = cfg.openai_budget || '';
+    document.getElementById('s-claude').value = cfg.claude_budget || '';
+    document.getElementById('s-spent').textContent  = '$' + (cfg.spent_usd||0).toFixed(2);
+    document.getElementById('s-remain').textContent = '$' + (cfg.remaining_usd||0).toFixed(2);
+    document.getElementById('s-version').textContent = cfg.version || '?';
+    document.getElementById('s-branch').textContent  = cfg.branch  || '?';
+
+    // Models
+    const presets = models.presets || [];
+    const cur = models.current || {};
+    const roles = [
+      {key: 'main',  label: 'Основная модель (OUROBOROS_MODEL)'},
+      {key: 'light', label: 'Лёгкая модель (OUROBOROS_MODEL_LIGHT)'},
+      {key: 'code',  label: 'Code модель (OUROBOROS_MODEL_CODE)'},
+    ];
+    document.getElementById('model-fields').innerHTML = roles.map(r => {
+      const val = cur[r.key] || '';
+      const opts = presets.map(p => `<option value="${esc(p.id)}" ${p.id===val?'selected':''}>${esc(p.name)} — ${p.id}</option>`).join('');
+      return `<div class="field">
+        <label>${r.label}</label>
+        <div class="row-fields" style="gap:8px">
+          <select id="model-${r.key}">${opts}</select>
+          <button class="save-btn" onclick="saveModel('${r.key}')">Сохранить</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">Сейчас: ${esc(val)}</div>
+      </div>`;
+    }).join('');
+
+    // Ollama settings
+    renderOllamaBlock(ollama, 'ollama-settings-status');
+
+  } catch(e) { console.error('Settings load error', e); }
+}
+
+async function saveBudgets() {
+  const body = {
+    total_usd:     parseFloat(document.getElementById('s-total').value)  || null,
+    openai_budget: parseFloat(document.getElementById('s-openai').value) || null,
+    claude_budget: parseFloat(document.getElementById('s-claude').value) || null,
+  };
+  const res = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (res.ok) { showSaved('budget-saved'); loadSettingsPage(); }
+}
+
+async function saveModel(role) {
+  const model_id = document.getElementById('model-' + role).value;
+  if (!model_id) return;
+  const res = await fetch('/api/models', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({role, model_id})});
+  if (res.ok) showSaved('model-saved');
+}
+
+function showSaved(id) {
+  const el = document.getElementById(id);
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 2500);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Utils
+// ══════════════════════════════════════════════════════════════════════
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtNum(n) { return Number(n).toLocaleString('ru'); }
 </script>
 </body>
 </html>
